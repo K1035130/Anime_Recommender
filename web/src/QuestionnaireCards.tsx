@@ -1,21 +1,14 @@
 import { useEffect, useState } from 'react'
 import { api, type Choice, type Experience, type QuestionItem } from './api'
+import { errorText } from './errors'
+import { useI18n } from './i18n-context'
 import type { AnswerMap } from './storage'
 
 // 开场问题：先问资历，决定后面出题的年份回溯窗口（不影响推荐范围本身，
 // 只影响问卷候选池——src/questionnaire.py 的 EXPERIENCE 表）。
-const EXPERIENCE_OPTIONS: [Experience, string, string][] = [
-  ['new', '刚入坑不久', '大概 3 年以内 —— 只问最近 5 年的番'],
-  ['mid', '有点资历', '5 年左右 —— 问最近 10 年的番'],
-  ['veteran', '老观众了', '看了很多年 —— 不限年份，什么时候的番都问'],
-]
+const EXPERIENCE_OPTIONS: Experience[] = ['new', 'mid', 'veteran']
 
-const CHOICES: [Choice, string][] = [
-  ['seen', '看过'],
-  ['wish', '想尝试'],
-  ['pass', '不感兴趣'],
-  ['skip', '跳过（还没了解过）'],
-]
+const CHOICES: Choice[] = ['seen', 'wish', 'pass', 'skip']
 
 type Phase = 'experience' | 'quiz'
 
@@ -32,7 +25,8 @@ export default function QuestionnaireCards({
   const [experience, setExperience] = useState<Experience | null>(null)
   const [items, setItems] = useState<QuestionItem[]>([])
   const [index, setIndex] = useState(0)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  const { lang, t } = useI18n()
 
   useEffect(() => {
     if (experience === null) return
@@ -41,7 +35,7 @@ export default function QuestionnaireCards({
     api
       .questionnaire(30, experience)
       .then((r) => setItems(r.items))
-      .catch((e) => setError(String(e.message ?? e)))
+      .catch((e) => setError(e ?? 'error'))
   }, [experience])
 
   function goTo(i: number) {
@@ -59,16 +53,17 @@ export default function QuestionnaireCards({
   if (phase === 'experience') {
     return (
       <QuizBox
-        eyebrow="开场问题"
-        title="你看番多久了？"
-        subtitle="决定接下来问卷问的年份范围，不影响最终推荐的作品范围"
+        eyebrow={t.quiz.openingEyebrow}
+        title={t.quiz.howLong}
+        subtitle={t.quiz.howLongSub}
         onPrev={null}
         onNext={() => setPhase('quiz')}
         nextDisabled={experience === null}
-        nextLabel="开始答题 ›"
+        nextLabel={t.quiz.start}
       >
         <div className="space-y-2">
-          {EXPERIENCE_OPTIONS.map(([e, title, desc]) => {
+          {EXPERIENCE_OPTIONS.map((e) => {
+            const [title, desc] = t.quiz.experience[e]
             const selected = experience === e
             return (
               <OptionRow key={e} selected={selected} onClick={() => setExperience(e)}>
@@ -85,12 +80,12 @@ export default function QuestionnaireCards({
   if (error) {
     return (
       <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm">
-        {error}
+        {errorText(error, lang)}
       </div>
     )
   }
   if (items.length === 0) {
-    return <div className="text-sm text-(--color-muted)">加载中…</div>
+    return <div className="text-sm text-(--color-muted)">{t.quiz.loading}</div>
   }
 
   const current = items[index]
@@ -99,18 +94,19 @@ export default function QuestionnaireCards({
 
   return (
     <QuizBox
-      eyebrow={`问题 ${index + 1} / ${items.length}`}
+      eyebrow={t.quiz.questionOf(index + 1, items.length)}
       progress={(index + 1) / items.length}
       title={current.name}
-      subtitle={`${current.year ?? ''}${current.year ? ' · ' : ''}${current.done.toLocaleString()} 人看过`}
-      body={<p className="mt-3 text-sm leading-relaxed text-(--color-muted)">{current.summary ?? '暂无简介。'}</p>}
+      subtitle={`${current.year ?? ''}${current.year ? ' · ' : ''}${t.quiz.watchedBy(current.done.toLocaleString(t.locale))}`}
+      body={<p className="mt-3 text-sm leading-relaxed text-(--color-muted)">{current.summary ?? t.quiz.noSummary}</p>}
       onPrev={goPrev}
       onNext={isLast ? () => onFinish?.() : () => goTo(index + 1)}
       nextDisabled={!answer}
-      nextLabel={isLast ? '完成 · 去看推荐' : '下一题 ›'}
+      nextLabel={isLast ? t.quiz.finish : t.quiz.next}
     >
       <div className="space-y-2">
-        {CHOICES.map(([c, label]) => {
+        {CHOICES.map((c) => {
+          const label = t.choice[c]
           const selected = answer?.choice === c
           return (
             <OptionRow
@@ -128,7 +124,7 @@ export default function QuestionnaireCards({
 
       {answer?.choice === 'seen' && (
         <div className="mt-3 rounded-xl border border-(--color-line) px-4 py-3">
-          <div className="mb-1.5 text-xs text-(--color-muted)">打几分？</div>
+          <div className="mb-1.5 text-xs text-(--color-muted)">{t.quiz.scorePrompt}</div>
           <label className="flex items-center gap-3">
             <input
               type="range"
@@ -173,6 +169,7 @@ function QuizBox({
   nextLabel: string
   children: React.ReactNode
 }) {
+  const { t } = useI18n()
   return (
     <div className="flex min-h-[62vh] items-center justify-center">
       <div className="w-full max-w-md rounded-2xl border border-(--color-line) bg-(--color-surface) p-6 shadow-sm">
@@ -200,7 +197,7 @@ function QuizBox({
               onClick={onPrev}
               className="rounded-lg border border-(--color-line) px-4 py-2 text-sm text-(--color-muted) transition hover:border-(--color-brand) hover:text-(--color-brand)"
             >
-              ‹ 上一题
+              {t.quiz.prev}
             </button>
           ) : (
             <span />

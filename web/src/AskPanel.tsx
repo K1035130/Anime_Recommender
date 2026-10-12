@@ -7,51 +7,80 @@ import {
   type AskResponse,
   type AskRoute,
 } from './api'
+import { errorText } from './errors'
+import { useI18n } from './i18n-context'
+import type { Lang } from './messages'
 import { useSession } from './session-context'
-import { USAGE_NOTICE } from './usageNotice'
+import { USAGE_NOTICE, USAGE_NOTICE_EN } from './usageNotice'
 
-const ROUTE_LABEL: Record<AskRoute, string> = {
-  auto: '自动',
-  ask: '剧情',
-  voice: '声优',
-  season: '新番',
-  find: '找番',
-}
-
-// 展示用：实际 route 可能与用户选的按钮不同（回落/意图校验改判），
-// 这里只是把后端返回的字符串映一个中文标签，认不出就原样显示。
-const ROUTE_DISPLAY: Record<string, string> = {
-  ask: '剧情问答',
-  voice: '声优配役',
-  season: '新番档期',
-  find: '语义找番',
-}
-
-const SUGGESTIONS = [
-  '《灰羽联盟》讲了什么故事？',
-  '安兹·乌尔·恭是谁？',
-  '花泽香菜配过哪些角色？',
-  '十年前的这个季度在播什么？',
-  '有没有主角很强但很低调的番？',
-]
+const ROUTES: AskRoute[] = ['auto', 'ask', 'voice', 'season', 'find']
 
 const TEXTAREA_MAX_PX = 200
 
+// 英文界面下按状态码给的专属提示（后端 detail 是中文，见 errors.ts）。
+const EN_ASK_ERRORS = {
+  401: 'Please log in to ask questions',
+  // 译成中文后超过 /api/ask 的 200 字上限，或 /api/translate 的 500 字上限。
+  422: 'Your question is too long — please shorten it',
+  429: "You've reached the daily question limit",
+  503: 'The AI service is temporarily unavailable — please try again later',
+}
+
+/**
+ * 一轮问答在哪一步。
+ *
+ * 中文界面只会经过 asking → done；英文界面在它前后各多一步翻译
+ * （/api/ask 本身只收发中文，见 i18n.tsx 的模块注释）。
+ */
+type Phase = 'translating-question' | 'asking' | 'translating-answer' | 'done'
+
 interface Turn {
   id: number
+  /** 提这一轮时的界面语言。⚠️ 按轮记，不读当前语言 —— 用户中途切换语言，
+   *  已有的轮次不该跟着变（英文轮的回答译文是当时请求来的，中文轮没有译文）。 */
+  lang: Lang
+  /** 用户输入的原文（展示用）。 */
   question: string
+  /** 实际送进 /api/ask 的问句：中文界面同 question，英文界面是译文。
+   *  多轮历史回传的是它 —— 管道永远只见到中文。 */
+  questionZh: string | null
   routeRequested: AskRoute
   scopeAtAsk: number | null
-  loading: boolean
+  phase: Phase
   response: AskResponse | null
+  /** 英文界面：回答的英文译文。为 null 且 translationFailed 时展示中文原文。 */
+  answerEn: string | null
+  translationFailed: boolean
   error: string | null
   elapsedMs: number
 }
 
 let turnSeq = 0
 
+/**
+ * 这条回答的 answer 正文会不会被展示。
+ *
+ * season/find 成功时，answer 是同一份数据的文本复述——有结构化视图就不
+ * 重复展示纯文本，避免同一条信息出现两遍。
+ *
+ * 🚨 **voice 是例外（2026-08-25 起）。** 它的 answer 不再是列表的复述，
+ *    而是 LLM 针对问题写的回答（「最近配过什么」会挑年份最新的几部讲），
+ *    藏起来等于把这次改动整个白做。判据用 meta.llm 在不在：LLM 挂掉时
+ *    后端会回落成名单文本，那种情况下它**确实**是复述，仍然该藏。
+ *
+ * ⚠️ 抽成函数是因为英文界面要用同一个判据决定**要不要翻译**：不展示的
+ *    answer 去翻译，是白白多等几秒、多花一次调用。
+ */
+function answerShown(res: AskResponse): boolean {
+  const voiceHasProse = Boolean(res.voice) && Boolean(res.meta?.llm)
+  const hasStructured =
+    Boolean(res.season || res.find) || (Boolean(res.voice) && !voiceHasProse)
+  return Boolean(res.answer) && !hasStructured
+}
+
 export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
   const { user, loading: sessionLoading, refreshUser, setQuotaRemaining } = useSession()
+  const { lang, t } = useI18n()
   const [turns, setTurns] = useState<Turn[]>([])
   const [question, setQuestion] = useState('')
   const [routeChoice, setRouteChoice] = useState<AskRoute>('auto')
@@ -62,7 +91,7 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const busy = turns.some((t) => t.loading)
+  const busy = turns.some((t) => t.phase !== 'done')
 
   useEffect(() => {
     const el = scrollRef.current
@@ -80,43 +109,89 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
   function buildHistory(): [string, string][] {
     // ⚠️ 服务端不存会话状态（J 节），历史全靠客户端回传。
     //    服务端自己还会再截一次（MAX_HISTORY_TURNS=3），这里多传几轮也无妨。
+    // ⚠️ 回传的是**中文**问句与**中文**回答（questionZh / response.answer），
+    //    不是英文原文或译文 —— 管道只认中文，混进英文会让代词消解与作用域
+    //    继承（J 节）在英文用户这里静默失效。
     return turns
-      .filter((t) => t.response?.answer)
+      .filter((t) => t.response?.answer && t.questionZh)
       .slice(-4)
-      .map((t) => [t.question, t.response!.answer as string])
+      .map((t) => [t.questionZh as string, t.response!.answer as string])
   }
 
-  async function submit(q: string, route: AskRoute, scopeId: number | null) {
+  function patch(id: number, p: Partial<Turn>) {
+    setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...p } : t)))
+  }
+
+  /**
+   * @param knownZh 已经译好的中文问句。反问后选候选作品时传入，免得同一句话
+   *                再翻译一遍（多等一两秒，且两次译文可能不同）。
+   */
+  async function submit(q: string, route: AskRoute, scopeId: number | null, knownZh?: string) {
     const text = q.trim()
     if (!text) return
     const id = ++turnSeq
+    const turnLang = lang
     const history = buildHistory()
     const startedAt = performance.now()
+    const needsInbound = turnLang === 'en' && knownZh == null
     setTurns((prev) => [
       ...prev,
-      { id, question: text, routeRequested: route, scopeAtAsk: scopeId, loading: true, response: null, error: null, elapsedMs: 0 },
+      {
+        id,
+        lang: turnLang,
+        question: text,
+        questionZh: needsInbound ? null : (knownZh ?? text),
+        routeRequested: route,
+        scopeAtAsk: scopeId,
+        phase: needsInbound ? 'translating-question' : 'asking',
+        response: null,
+        answerEn: null,
+        translationFailed: false,
+        error: null,
+        elapsedMs: 0,
+      },
     ])
 
     const ticker = window.setInterval(() => {
-      setTurns((prev) =>
-        prev.map((t) => (t.id === id ? { ...t, elapsedMs: performance.now() - startedAt } : t)),
-      )
+      patch(id, { elapsedMs: performance.now() - startedAt })
     }, 400)
 
     try {
+      // ① 英文问句 → 中文。⚠️ 失败直接报错，不拿英文原句硬送 /api/ask：
+      //    管道会照常跑完，给一个看起来正常却答非所问的回答。
+      let zh = knownZh ?? text
+      if (needsInbound) {
+        zh = (await api.translate(text, 'zh')).text
+        patch(id, { questionZh: zh, phase: 'asking' })
+      }
+
+      // ② 原管道，原样。
       const res = await api.ask({
-        question: text,
+        question: zh,
         route,
         spoiler,
         top_k: 8,
         scope: scopeId,
         history,
       })
-      setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, loading: false, response: res } : t)))
       // 每问一条就少一条，顶栏的「今日剩 N」要跟着动。
       // ⚠️ 走本地递减而不是重查 /auth/me：少一次往返，而真实值下次
       //    进页面/刷新时自然会对齐。
       if (user) setQuotaRemaining(Math.max(0, user.quota.remaining - 1))
+
+      // ③ 中文回答 → 英文。只译会被展示的那份（见 answerShown）。
+      //    ⚠️ 失败**不报错**：中文回答本身是完整可用的，退回展示它并注明。
+      if (turnLang === 'en' && answerShown(res)) {
+        patch(id, { response: res, phase: 'translating-answer' })
+        try {
+          const en = (await api.translate(res.answer as string, 'en')).text
+          patch(id, { answerEn: en, phase: 'done' })
+        } catch {
+          patch(id, { translationFailed: true, phase: 'done' })
+        }
+      } else {
+        patch(id, { response: res, phase: 'done' })
+      }
     } catch (e) {
       // 401/429 是业务状态不是故障，各自给出下一步动作（登录 / 等配额），
       // 而不是甩一句「请求失败」。
@@ -125,9 +200,7 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
         onOpenAuth()
       }
       if (e instanceof QuotaError) void refreshUser()
-      setTurns((prev) =>
-        prev.map((t) => (t.id === id ? { ...t, loading: false, error: String((e as Error).message ?? e) } : t)),
-      )
+      patch(id, { phase: 'done', error: errorText(e, turnLang, EN_ASK_ERRORS) })
     } finally {
       window.clearInterval(ticker)
     }
@@ -149,9 +222,9 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
     }
   }
 
-  function pickCandidate(originalQuestion: string, c: AskCandidate) {
+  function pickCandidate(turn: Turn, c: AskCandidate) {
     setScope({ id: c.series_root, title: c.title })
-    void submit(originalQuestion, routeChoice, c.series_root)
+    void submit(turn.question, routeChoice, c.series_root, turn.questionZh ?? undefined)
   }
 
   // 🚨 游客不能用问答（Kevin 2026-08-24 定）。这修订了设计文档那句
@@ -171,8 +244,8 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
             <EmptyState onPick={(s) => setQuestion(s)} />
           ) : (
             <div className="space-y-7">
-              {turns.map((t) => (
-                <TurnView key={t.id} turn={t} onPickCandidate={pickCandidate} />
+              {turns.map((turn) => (
+                <TurnView key={turn.id} turn={turn} onPickCandidate={pickCandidate} />
               ))}
             </div>
           )}
@@ -183,9 +256,9 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
         <div className="mx-auto max-w-3xl">
           {scope && (
             <div className="mb-2 flex items-center gap-2 rounded-lg border border-(--color-brand)/40 bg-(--color-brand)/10 px-3 py-1.5 text-xs">
-              <span>作用域已锁定：《{scope.title}》</span>
+              <span>{t.ask.scopeLocked(scope.title)}</span>
               <button onClick={() => setScope(null)} className="ml-auto text-(--color-muted) underline">
-                清除
+                {t.ask.clear}
               </button>
             </div>
           )}
@@ -197,13 +270,13 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
               onChange={(e) => setQuestion(e.target.value)}
               onKeyDown={onKeyDown}
               rows={1}
-              maxLength={200}
-              placeholder="问点什么…"
+              maxLength={t.ask.maxLength}
+              placeholder={t.ask.placeholder}
               className="block w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-sm leading-relaxed outline-none placeholder:text-(--color-muted)"
             />
 
             <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2.5">
-              {(Object.keys(ROUTE_LABEL) as AskRoute[]).map((r) => (
+              {ROUTES.map((r) => (
                 <button
                   key={r}
                   type="button"
@@ -214,12 +287,12 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
                       : 'border-(--color-line) text-(--color-muted) hover:border-(--color-brand) hover:text-(--color-brand)'
                   }`}
                 >
-                  {ROUTE_LABEL[r]}
+                  {t.ask.routes[r]}
                 </button>
               ))}
 
               <label
-                title="放开剧透门控（默认过滤已标记的剧透内容）"
+                title={t.ask.spoilerTitle}
                 className={`ml-1 flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition ${
                   spoiler
                     ? 'border-(--color-warn) text-(--color-warn)'
@@ -232,13 +305,13 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
                   onChange={(e) => setSpoiler(e.target.checked)}
                   className="h-3 w-3 accent-(--color-warn)"
                 />
-                允许剧透
+                {t.ask.allowSpoilers}
               </label>
 
               <button
                 type="button"
                 onClick={() => setNoticeOpen(true)}
-                title="使用须知"
+                title={t.ask.notice}
                 className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-(--color-line) text-xs text-(--color-muted) transition hover:border-(--color-brand) hover:text-(--color-brand)"
               >
                 ?
@@ -248,8 +321,8 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
                 type="button"
                 onClick={send}
                 disabled={busy || outOfQuota || !question.trim()}
-                aria-label="发送"
-                title={outOfQuota ? '24 小时配额已用完' : undefined}
+                aria-label={t.ask.send}
+                title={outOfQuota ? t.ask.quotaOut : undefined}
                 className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-(--color-brand) text-(--color-on-brand) transition disabled:opacity-30"
               >
                 {busy ? (
@@ -264,17 +337,19 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
           <p className="mt-2 text-center text-[11px] text-(--color-muted)">
             {outOfQuota ? (
               <span className="text-(--color-warn)">
-                24 小时内的 {user?.quota.limit} 条已用完
+                {t.ask.quotaUsedUp(user?.quota.limit ?? 0)}
                 {user?.quota.reset_at
-                  ? `，${new Date(user.quota.reset_at).toLocaleString('zh-CN', {
-                      month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
-                    })} 之后恢复一条`
-                  : '，请稍后再来'}
+                  ? t.ask.quotaResetAt(
+                      new Date(user.quota.reset_at).toLocaleString(t.locale, {
+                        month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                      }),
+                    )
+                  : t.ask.quotaLater}
               </span>
             ) : (
               <>
-                回答可能有错或包含剧透，请核对出处 · Enter 发送，Shift+Enter 换行
-                {user && ` · 今日还能问 ${user.quota.remaining} 条`}
+                {t.ask.footer}
+                {user && t.ask.footerLeft(user.quota.remaining)}
               </>
             )}
           </p>
@@ -287,36 +362,35 @@ export default function AskPanel({ onOpenAuth }: { onOpenAuth: () => void }) {
 }
 
 function GuestGate({ onOpenAuth }: { onOpenAuth: () => void }) {
+  const { t } = useI18n()
   return (
     <div className="flex h-full flex-col items-center justify-center px-4 text-center">
       <span className="text-4xl">💬</span>
-      <h1 className="mt-4 text-2xl font-semibold">问答需要登录</h1>
+      <h1 className="mt-4 text-2xl font-semibold">{t.ask.guestTitle}</h1>
       <p className="mt-2 max-w-md text-sm leading-relaxed text-(--color-muted)">
-        每条问答都要调用大模型，所以要绑定账号来限流：
-        <strong className="text-(--color-ink)">每 24 小时 10 条</strong>。
+        {t.ask.guestBodyPre}
+        <strong className="text-(--color-ink)">{t.ask.guestBodyStrong}</strong>
+        {t.ask.guestBodyPost}
       </p>
-      <p className="mt-1 max-w-md text-sm leading-relaxed text-(--color-muted)">
-        推荐、问卷、打分不受影响，不登录也能用。
-      </p>
+      <p className="mt-1 max-w-md text-sm leading-relaxed text-(--color-muted)">{t.ask.guestFree}</p>
       <button
         onClick={onOpenAuth}
         className="mt-6 rounded-lg bg-(--color-brand) px-5 py-2 text-sm font-medium text-(--color-on-brand)"
       >
-        登录 / 注册
+        {t.ask.guestButton}
       </button>
     </div>
   )
 }
 
 function EmptyState({ onPick }: { onPick: (s: string) => void }) {
+  const { t } = useI18n()
   return (
     <div className="flex min-h-[45vh] flex-col items-center justify-center text-center">
-      <h1 className="text-2xl font-semibold">有什么想问的？</h1>
-      <p className="mt-2 text-sm text-(--color-muted)">
-        剧情、角色、声优、档期，或者描述一下想看的番
-      </p>
+      <h1 className="text-2xl font-semibold">{t.ask.emptyTitle}</h1>
+      <p className="mt-2 text-sm text-(--color-muted)">{t.ask.emptySub}</p>
       <div className="mt-6 flex flex-wrap justify-center gap-2">
-        {SUGGESTIONS.map((s) => (
+        {t.ask.suggestions.map((s) => (
           <button
             key={s}
             onClick={() => onPick(s)}
@@ -335,15 +409,23 @@ function TurnView({
   onPickCandidate,
 }: {
   turn: Turn
-  onPickCandidate: (originalQuestion: string, c: AskCandidate) => void
+  onPickCandidate: (turn: Turn, c: AskCandidate) => void
 }) {
+  const { t } = useI18n()
+  const loading = turn.phase !== 'done'
+  const phaseLabel =
+    turn.phase === 'translating-question'
+      ? t.ask.translatingQuestion
+      : turn.phase === 'translating-answer'
+        ? t.ask.translatingAnswer
+        : t.ask.thinking
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
         <div className="max-w-[80%] rounded-2xl bg-(--color-line)/50 px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap">
           {turn.question}
           {turn.scopeAtAsk != null && (
-            <div className="mt-1 text-[11px] text-(--color-muted)">已限定作用域</div>
+            <div className="mt-1 text-[11px] text-(--color-muted)">{t.ask.scoped}</div>
           )}
         </div>
       </div>
@@ -351,58 +433,63 @@ function TurnView({
       {/* ⚠️ 回答不套气泡：这条链路的回答动辄几百字带出处列表，
           包进气泡会挤成窄条，平铺可读性好得多（Claude 网页版同理）。 */}
       <div className="text-sm">
-        {turn.loading && (
-          <div className="flex items-center gap-2 text-(--color-muted)">
+        {turn.response && <ResponseView turn={turn} onPickCandidate={onPickCandidate} />}
+        {loading && (
+          <div className={`flex items-center gap-2 text-(--color-muted) ${turn.response ? 'mt-3' : ''}`}>
             <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-(--color-brand) border-t-transparent" />
             <span>
-              思考中…{turn.elapsedMs > 1500 ? `${(turn.elapsedMs / 1000).toFixed(0)}s` : ''}
-              {turn.elapsedMs > 6000 ? '（剧情问答通常要 10–45 秒）' : ''}
+              {phaseLabel}
+              {turn.elapsedMs > 1500 ? `${(turn.elapsedMs / 1000).toFixed(0)}s` : ''}
+              {turn.phase === 'asking' && turn.elapsedMs > 6000 ? t.ask.slowHint : ''}
             </span>
           </div>
         )}
-        {turn.error && <div className="text-(--color-danger)">请求失败：{turn.error}</div>}
-        {turn.response && (
-          <ResponseView res={turn.response} question={turn.question} onPickCandidate={onPickCandidate} />
-        )}
+        {turn.error && <div className="text-(--color-danger)">{t.ask.failed(turn.error)}</div>}
       </div>
     </div>
   )
 }
 
 function ResponseView({
-  res,
-  question,
+  turn,
   onPickCandidate,
 }: {
-  res: AskResponse
-  question: string
-  onPickCandidate: (originalQuestion: string, c: AskCandidate) => void
+  turn: Turn
+  onPickCandidate: (turn: Turn, c: AskCandidate) => void
 }) {
-  const displayRoute = ROUTE_DISPLAY[res.route] ?? res.route
-  // season/find 成功时，answer 是同一份数据的文本复述——有结构化视图就不
-  // 重复展示纯文本，避免同一条信息出现两遍。
-  //
-  // 🚨 **voice 是例外（2026-08-25 起）。** 它的 answer 不再是列表的复述，
-  //    而是 LLM 针对问题写的回答（「最近配过什么」会挑年份最新的几部讲），
-  //    藏起来等于把这次改动整个白做。判据用 meta.llm 在不在：LLM 挂掉时
-  //    后端会回落成名单文本，那种情况下它**确实**是复述，仍然该藏。
-  const voiceHasProse = Boolean(res.voice) && Boolean(res.meta?.llm)
-  const hasStructured =
-    Boolean(res.season || res.find) || (Boolean(res.voice) && !voiceHasProse)
+  const { t } = useI18n()
+  const res = turn.response!
+  const isEn = turn.lang === 'en'
+  const displayRoute = t.ask.routeDisplay[res.route] ?? res.route
+
+  // 英文轮：译文到了就展示译文；翻译中先不展示中文（免得一闪而过）；
+  // 翻译失败则退回中文原文并注明。
+  let answerText: string | null = null
+  if (answerShown(res)) {
+    if (!isEn) answerText = res.answer
+    else if (turn.answerEn) answerText = turn.answerEn
+    else if (turn.translationFailed) answerText = res.answer
+  }
+  // 英文界面显示原名（多为日文/罗马字），中文界面优先中文名。
+  const pickName = (name: string, nameCn: string | null) => (isEn ? name : (nameCn ?? name))
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-(--color-muted)">
         <span
           className="rounded bg-(--color-brand)/12 px-1.5 py-0.5 text-(--color-brand)"
-          title={res.route_reason}
+          title={isEn ? undefined : res.route_reason}
         >
-          走了：{displayRoute}
+          {t.ask.route(displayRoute)}
         </span>
-        {res.route_reason && <span className="italic">{res.route_reason}</span>}
+        {/* ⚠️ route_reason 是后端写的中文说明，英文轮不展示 —— 为它再调一次
+            翻译不值得，路由标签本身已经说明了走的是哪条分支。 */}
+        {!isEn && res.route_reason && <span className="italic">{res.route_reason}</span>}
       </div>
 
-      {res.answer && !hasStructured && (
-        <p className="leading-7 whitespace-pre-wrap">{res.answer}</p>
+      {answerText && <p className="leading-7 whitespace-pre-wrap">{answerText}</p>}
+      {isEn && turn.translationFailed && (
+        <p className="text-xs text-(--color-warn)">{t.ask.translationFailed}</p>
       )}
 
       {res.state === 'ambiguous' && res.candidates.length > 0 && (
@@ -410,10 +497,10 @@ function ResponseView({
           {res.candidates.map((c) => (
             <button
               key={c.series_root}
-              onClick={() => onPickCandidate(question, c)}
+              onClick={() => onPickCandidate(turn, c)}
               className="rounded-full border border-(--color-line) px-2.5 py-1 text-xs transition hover:border-(--color-brand) hover:text-(--color-brand)"
             >
-              《{c.title}》{c.year ? `（${c.year}）` : ''}
+              {t.ask.candidate(c.title, c.year)}
             </button>
           ))}
         </div>
@@ -422,7 +509,7 @@ function ResponseView({
       {res.route === 'ask' && res.state === 'ok' && res.chunks.length > 0 && (
         <details className="rounded-lg border border-(--color-line) px-2.5 py-1.5">
           <summary className="cursor-pointer text-xs text-(--color-muted)">
-            查看出处（{res.chunks.length} 条）
+            {t.ask.sources(res.chunks.length)}
           </summary>
           <ul className="mt-2 space-y-1.5">
             {res.chunks.map((ch) => (
@@ -430,10 +517,12 @@ function ResponseView({
                 <div className="mb-1 flex flex-wrap items-center gap-1 text-(--color-muted)">
                   {ch.section && <span className="font-medium text-(--color-ink)">【{ch.section}】</span>}
                   <span className="rounded bg-(--color-line)/40 px-1">{ch.kind}</span>
-                  <span>{ch.source === 'moegirl' ? '萌娘百科' : 'Bangumi'}</span>
-                  {ch.pinned && <span className="rounded bg-(--color-brand)/12 px-1 text-(--color-brand)">精确命中</span>}
-                  {ch.spoiler_level > 0 && <span className="rounded bg-red-500/10 px-1 text-(--color-danger)">含剧透</span>}
+                  <span>{ch.source === 'moegirl' ? t.ask.moegirl : 'Bangumi'}</span>
+                  {ch.pinned && <span className="rounded bg-(--color-brand)/12 px-1 text-(--color-brand)">{t.ask.exactMatch}</span>}
+                  {ch.spoiler_level > 0 && <span className="rounded bg-red-500/10 px-1 text-(--color-danger)">{t.ask.spoiler}</span>}
                 </div>
+                {/* 出处是语料原文，有意不翻译：它的用途是让用户核对回答，
+                    译一遍就不再是「原文」了。 */}
                 <p className="whitespace-pre-wrap text-(--color-muted)">{ch.text}</p>
               </li>
             ))}
@@ -444,16 +533,16 @@ function ResponseView({
       {res.voice && (
         <div className="rounded-lg border border-(--color-line) px-2.5 py-2 text-xs">
           <div className="mb-1.5 font-medium">
-            {res.voice.name_cn ?? res.voice.name} · 共 {res.voice.n_roles} 个配役
+            {t.ask.voiceHeader(pickName(res.voice.name, res.voice.name_cn), res.voice.n_roles)}
           </div>
           <ul className="space-y-1">
             {res.voice.items.map((r) => (
               <li key={`${r.character_id}-${r.series_root}`} className="flex justify-between gap-2 text-(--color-muted)">
                 <span>
-                  {r.character_name ?? '（未知角色名）'} · 《{r.title}》
-                  {r.air_year ? `（${r.air_year}）` : ''}
+                  {r.character_name ?? t.ask.unknownCharacter} · {t.ask.candidate(r.title, null)}
+                  {r.air_year ? t.ask.year(r.air_year) : ''}
                 </span>
-                {r.role_type === 1 && <span className="shrink-0 text-(--color-brand)">主角</span>}
+                {r.role_type === 1 && <span className="shrink-0 text-(--color-brand)">{t.ask.lead}</span>}
               </li>
             ))}
           </ul>
@@ -463,12 +552,12 @@ function ResponseView({
       {res.season && (
         <div className="rounded-lg border border-(--color-line) px-2.5 py-2 text-xs">
           <div className="mb-1.5 font-medium">
-            {res.season.year} 年 {res.season.month} 月番 · 共 {res.season.total} 部
+            {t.ask.seasonHeader(res.season.year, res.season.month, res.season.total)}
           </div>
           <ul className="space-y-1">
             {res.season.items.map((it) => (
               <li key={it.subject_id} className="flex justify-between gap-2 text-(--color-muted)">
-                <span>{it.name_cn ?? it.name}</span>
+                <span>{pickName(it.name, it.name_cn)}</span>
                 <span className="shrink-0">{it.air_date}</span>
               </li>
             ))}
@@ -483,7 +572,7 @@ function ResponseView({
               <li key={h.subject_id} className="flex justify-between gap-2 text-(--color-muted)">
                 <span>
                   {i + 1}. {h.name}
-                  {h.air_year ? `（${h.air_year}）` : ''}
+                  {h.air_year ? t.ask.year(h.air_year) : ''}
                 </span>
                 <a
                   href={`https://bgm.tv/subject/${h.subject_id}`}
@@ -491,7 +580,7 @@ function ResponseView({
                   rel="noreferrer"
                   className="shrink-0 text-(--color-brand) hover:underline"
                 >
-                  详情
+                  {t.ask.details}
                 </a>
               </li>
             ))}
@@ -506,7 +595,7 @@ function ResponseView({
           rel="noreferrer"
           className="inline-block text-[11px] text-(--color-brand) hover:underline"
         >
-          {res.title ?? '查看条目'} → Bangumi
+          {res.title ?? t.ask.viewEntry} → Bangumi
         </a>
       )}
     </div>
@@ -514,6 +603,7 @@ function ResponseView({
 }
 
 function NoticeDrawer({ onClose }: { onClose: () => void }) {
+  const { lang, t } = useI18n()
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center"
@@ -524,13 +614,13 @@ function NoticeDrawer({ onClose }: { onClose: () => void }) {
         className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-t-2xl border border-(--color-line) bg-(--color-surface) p-5 sm:rounded-2xl"
       >
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-base font-medium">使用须知</h2>
+          <h2 className="text-base font-medium">{t.ask.notice}</h2>
           <button onClick={onClose} className="text-sm text-(--color-muted) hover:text-(--color-ink)">
-            关闭
+            {t.ask.close}
           </button>
         </div>
         <pre className="whitespace-pre-wrap font-sans text-xs leading-relaxed text-(--color-muted)">
-          {USAGE_NOTICE}
+          {lang === 'en' ? USAGE_NOTICE_EN : USAGE_NOTICE}
         </pre>
       </div>
     </div>

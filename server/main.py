@@ -1242,6 +1242,33 @@ def _ask_impl(req: schemas.AskRequest) -> schemas.AskResponse:
     )
 
 
+@app.post(f"{API}/translate", response_model=schemas.TranslateResponse)
+def translate(req: schemas.TranslateRequest,
+              request: Request) -> schemas.TranslateResponse:
+    """英文界面的出入站翻译：问句 en→zh 送进 /api/ask，回答 zh→en 展示。
+
+    ⚠️ **/api/ask 一行不改**，翻译由前端在它前后各调一次本端点。这样 RAG
+       管道、意图校验、配额、评测口径全部原样 —— 管道永远只见到中文。
+
+    🚨 **要登录，但不扣问答配额**（2026-10-11）。理由：它是 /api/ask 的附属
+       步骤，一条英文提问已经在 /api/ask 那里扣过一条；再扣的话英文用户
+       同样 10 条配额实际只能问 3 条。要登录是因为它会调 LLM（与
+       _require_user 的准入判据一致），游客本来也用不了问答。
+       ⬜ **已知缺口**：已登录用户可以绕开 /api/ask 单独刷这个端点。
+          挡住它的只有长度上限（schemas.TRANSLATE_MAX_*）和供应商自身的
+          限流；真被刷了，再给它加独立计数。
+
+    ⚠️ 失败一律 503，**不返回原文冒充译文**（见 llm.translate 的 docstring）。
+       回落策略在前端：入站失败就报错，出站失败就展示中文原文。
+    """
+    _require_user(request)
+    try:
+        text, _p = llm.translate(req.text, req.target)
+    except llm.LLMError as exc:
+        raise HTTPException(503, f"翻译不可用：{exc}") from exc
+    return schemas.TranslateResponse(text=text, target=req.target)
+
+
 @app.get(f"{API}/related", response_model=schemas.RelatedResponse)
 def get_related(
     series_root: int = Query(..., description="作品的系列根 id"),

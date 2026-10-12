@@ -260,6 +260,31 @@ class AskResponse(BaseModel):
     find: "FindResponse | None" = None
 
 
+# ── 英文界面的出入站翻译（POST /api/translate）────────────────────
+# ⚠️ 两个方向**长度上限不同**，且都是为了防滥用而不只是防超长：
+#    这个端点会调 LLM，不卡长度就是一台给已登录用户用的免费翻译机。
+#    zh：英文问句。前端 textarea 上限 400 字符，这里留一点余量。
+#    en：/api/ask 的中文回答。MAX_TOKENS_ANSWER=800 的中文远不到 4000 字。
+TRANSLATE_MAX_TO_ZH = 500
+TRANSLATE_MAX_TO_EN = 4000
+
+
+class TranslateRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=TRANSLATE_MAX_TO_EN)
+    target: Literal["zh", "en"]
+
+    @model_validator(mode="after")
+    def _cap_by_direction(self):
+        if self.target == "zh" and len(self.text) > TRANSLATE_MAX_TO_ZH:
+            raise ValueError(f"译成中文的文本最多 {TRANSLATE_MAX_TO_ZH} 字符")
+        return self
+
+
+class TranslateResponse(BaseModel):
+    text: str
+    target: Literal["zh", "en"]
+
+
 # ── 结构化关联查询（src/related.py）────────────────────────────────
 # ⚠️ 与 /ask 的性质完全不同：这里**零模型调用**，答案直接来自 staff / studios
 #    两列，精确且零幻觉。「某某还做过什么」是关联查询不是语义检索。

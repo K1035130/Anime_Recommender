@@ -2,20 +2,17 @@ import { useState } from 'react'
 import AccountPage from './AccountPage'
 import AskPanel from './AskPanel'
 import AuthDialog from './AuthDialog'
+import { useI18n } from './i18n-context'
+import type { Lang } from './messages'
 import RecommendHub from './RecommendHub'
 import { useSession } from './session-context'
 
 type View = 'home' | 'recommend' | 'ask' | 'account'
 
-const VIEW_TITLE: Record<Exclude<View, 'home'>, string> = {
-  recommend: '动漫推荐',
-  ask: '动漫问答',
-  account: '个人中心',
-}
-
 export default function App() {
   const [view, setView] = useState<View>('home')
   const [authOpen, setAuthOpen] = useState(false)
+  const { t } = useI18n()
 
   return (
     // ⚠️ 整页 flex 撑满视口，内容区拿 flex-1 —— 子页面里就不用写
@@ -27,20 +24,21 @@ export default function App() {
       <nav className="shrink-0 border-b border-(--color-line) bg-(--color-page)/95 backdrop-blur">
         <div className="flex items-center gap-2.5 px-5 py-2">
           {view === 'home' ? (
-            <span className="text-lg font-semibold">动漫推荐</span>
+            <span className="text-lg font-semibold">{t.nav.brand}</span>
           ) : (
             <>
               <button
                 onClick={() => setView('home')}
                 className="flex items-center gap-1 text-base text-(--color-muted) transition hover:text-(--color-brand)"
               >
-                <span aria-hidden>←</span> 首页
+                <span aria-hidden>←</span> {t.nav.home}
               </button>
               <span className="text-base text-(--color-line)">/</span>
-              <span className="text-lg font-semibold">{VIEW_TITLE[view]}</span>
+              <span className="text-lg font-semibold">{t.nav.viewTitle[view]}</span>
             </>
           )}
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2.5">
+            <LangToggle />
             <AccountMenu
               onOpenAuth={() => setAuthOpen(true)}
               onOpenAccount={() => setView('account')}
@@ -76,6 +74,7 @@ function AccountMenu({
   onOpenAccount: () => void
 }) {
   const { user, loading } = useSession()
+  const { t } = useI18n()
 
   // ⚠️ 冷启动查登录态时不要渲染「登录」按钮 —— 已登录用户会看到它闪一下
   //    再变成邮箱，像是被登出过。
@@ -87,7 +86,7 @@ function AccountMenu({
         onClick={onOpenAuth}
         className="inline-flex min-h-11 items-center rounded-lg border border-(--color-line) px-4 py-2 text-sm text-(--color-muted) transition hover:border-(--color-brand) hover:text-(--color-brand)"
       >
-        登录
+        {t.nav.login}
       </button>
     )
   }
@@ -101,7 +100,7 @@ function AccountMenu({
           不加的话长名字是被裁掉而不是显示省略号。 */}
       <button
         onClick={onOpenAccount}
-        title={`${user.username} · 进入个人中心`}
+        title={t.nav.openAccount(user.username)}
         className="inline-flex min-h-11 max-w-32 items-center rounded-lg border border-(--color-line) px-4 py-2 font-medium transition hover:border-(--color-brand) hover:text-(--color-brand) sm:max-w-44"
       >
         <span className="min-w-0 truncate">{user.username}</span>
@@ -110,9 +109,9 @@ function AccountMenu({
           矮一档，正好把「可点」和「只是信息」区分开。 */}
       <span
         className="rounded-full bg-(--color-brand)/12 px-3 py-1.5 text-(--color-brand)"
-        title={`问答每 24 小时 ${user.quota.limit} 条`}
+        title={t.nav.quotaTitle(user.quota.limit)}
       >
-        今日剩 {user.quota.remaining}
+        {t.nav.quotaLeft(user.quota.remaining)}
       </span>
     </div>
   )
@@ -120,28 +119,27 @@ function AccountMenu({
 
 function Home({ onEnter }: { onEnter: (v: View) => void }) {
   const { user, answered } = useSession()
+  const { t } = useI18n()
   return (
     <div className="mx-auto flex h-full max-w-3xl flex-col justify-center overflow-y-auto px-4 py-16">
       <header className="mb-10 text-center">
-        <h1 className="text-3xl font-semibold">动漫推荐</h1>
-        <p className="mt-2 text-sm text-(--color-muted)">
-          给看过的番打分，或者直接问点什么
-        </p>
+        <h1 className="text-3xl font-semibold">{t.nav.brand}</h1>
+        <p className="mt-2 text-sm text-(--color-muted)">{t.home.subtitle}</p>
       </header>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <FeatureCard
-          title="动漫推荐"
-          desc="填问卷、给动画打分，系统学你的口味，推给你可能会喜欢的番"
+          title={t.home.recTitle}
+          desc={t.home.recDesc}
           emoji="🎯"
-          note={answered > 0 ? `已打分 ${answered} 部` : '游客也能用'}
+          note={answered > 0 ? t.home.recNoteRated(answered) : t.home.recNoteGuest}
           onClick={() => onEnter('recommend')}
         />
         <FeatureCard
-          title="动漫问答"
-          desc="问剧情、问声优、问档期，或者描述一下找番——一个输入框全搞定"
+          title={t.home.askTitle}
+          desc={t.home.askDesc}
           emoji="💬"
-          note={user ? `今日还能问 ${user.quota.remaining} 条` : '需要登录'}
+          note={user ? t.home.askNoteLeft(user.quota.remaining) : t.home.askNoteLogin}
           onClick={() => onEnter('ask')}
         />
       </div>
@@ -162,6 +160,7 @@ function FeatureCard({
   note?: string
   onClick: () => void
 }) {
+  const { t } = useI18n()
   return (
     <button
       onClick={onClick}
@@ -172,8 +171,54 @@ function FeatureCard({
       <span className="text-sm leading-relaxed text-(--color-muted)">{desc}</span>
       {note && <span className="text-xs text-(--color-muted)">{note}</span>}
       <span className="mt-1 text-sm text-(--color-brand) opacity-0 transition group-hover:opacity-100">
-        进入 →
+        {t.home.enter}
       </span>
     </button>
+  )
+}
+
+/**
+ * 中 / 英切换：分段按钮，两种语言**始终同时显示**，当前那个高亮。
+ *
+ * ⚠️ 选项文字用各自语言写（「EN」「中文」），**不随界面语言翻译** ——
+ *    不认识当前界面语言的人也要能找到自己的那个，这是语言选择器的通行做法。
+ * ⚠️ 原先是单个按钮只显示「要切到的语言」，看不出当前是哪种、也不像开关
+ *    （2026-10-11 Kevin 要求改成可自由切换的按钮）。
+ */
+const LANG_OPTIONS: [Lang, string][] = [
+  ['en', 'EN'],
+  ['zh', '中文'],
+]
+
+function LangToggle() {
+  const { lang, setLang, t } = useI18n()
+  return (
+    <div
+      role="group"
+      aria-label={t.nav.language}
+      title={t.nav.language}
+      className="inline-flex min-h-11 items-center rounded-lg border border-(--color-line) p-1"
+    >
+      {LANG_OPTIONS.map(([value, label]) => {
+        const active = lang === value
+        return (
+          <button
+            key={value}
+            onClick={() => setLang(value)}
+            aria-pressed={active}
+            lang={value === 'zh' ? 'zh-CN' : 'en'}
+            // ⚠️ 外框 min-h-11 = 44px 触控目标；两个分段各自 ≥ 36px 高，
+            //    宽度靠 px-3 撑开，手机上不会点错到另一边。
+            className={`min-h-9 rounded-md px-3 text-sm transition ${
+              active
+                ? 'bg-(--color-brand) font-medium text-(--color-on-brand)'
+                : 'text-(--color-muted) hover:text-(--color-brand)'
+            }`}
+          >
+            {label}
+          </button>
+        )
+      })}
+    </div>
   )
 }

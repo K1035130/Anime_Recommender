@@ -107,11 +107,25 @@ export interface RatedListResponse {
   total: number
 }
 
+/**
+ * 后端返回的非 2xx。`message` 是后端的 detail（中文），`status` 是 HTTP 状态码。
+ *
+ * ⚠️ 英文界面靠 `status` 给出英文提示（errors.ts::errorText），**不要去 match
+ *    detail 文案** —— 那是后端随手写的中文，改一个字前端就静默失配。
+ */
+export class ApiError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
 /** 未登录时访问需要登录的接口。调用方据此弹登录框，而不是当成普通报错。 */
-export class UnauthorizedError extends Error {}
+export class UnauthorizedError extends ApiError {}
 
 /** 问答配额用尽（后端 429）。 */
-export class QuotaError extends Error {}
+export class QuotaError extends ApiError {}
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(BASE + path, {
@@ -135,9 +149,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     }
     // 401/429 是**业务状态**不是故障，调用方要分别处理（弹登录框 / 提示配额），
     // 所以给它们专门的类型 —— 否则只能去 match 报错文案，那是会漂的。
-    if (r.status === 401) throw new UnauthorizedError(detail)
-    if (r.status === 429) throw new QuotaError(detail)
-    throw new Error(detail)
+    if (r.status === 401) throw new UnauthorizedError(r.status, detail)
+    if (r.status === 429) throw new QuotaError(r.status, detail)
+    throw new ApiError(r.status, detail)
   }
   return r.json()
 }
@@ -284,6 +298,14 @@ export const api = {
   //    classify_intent 校验（0.3–4.9s）——见 CLAUDE.md「意图校验」一节。
   ask: (body: AskRequest) =>
     req<AskResponse>('/ask', { method: 'POST', body: JSON.stringify(body) }),
+
+  // 英文界面：问句 en→zh 送进 /ask，回答 zh→en 展示。要登录、不扣配额。
+  // ⚠️ 失败是 503，后端**不会**返回原文冒充译文 —— 回落策略在调用方。
+  translate: (text: string, target: 'zh' | 'en') =>
+    req<{ text: string; target: 'zh' | 'en' }>('/translate', {
+      method: 'POST',
+      body: JSON.stringify({ text, target }),
+    }),
 
   related: (seriesRoot: number, role = '', limit = 8) =>
     req<RelatedResponse>(

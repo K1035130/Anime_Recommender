@@ -1,12 +1,10 @@
 import { useEffect, useState } from 'react'
 import { api, type Choice, type SearchHit } from './api'
+import { errorText } from './errors'
+import { useI18n } from './i18n-context'
 import type { AnswerMap } from './storage'
 
-const CHOICES: [Choice, string][] = [
-  ['seen', '看过'],
-  ['wish', '想尝试'],
-  ['pass', '不感兴趣'],
-]
+const CHOICES: Choice[] = ['seen', 'wish', 'pass']
 
 export default function RateSearch({
   answers,
@@ -18,7 +16,8 @@ export default function RateSearch({
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<SearchHit[]>([])
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  const { lang, t } = useI18n()
 
   useEffect(() => {
     const query = q.trim()
@@ -32,7 +31,7 @@ export default function RateSearch({
       api
         .search(query)
         .then((r) => setHits(r))
-        .catch((e) => setError(String(e.message ?? e)))
+        .catch((e) => setError(e ?? 'error'))
         .finally(() => setBusy(false))
     }, 300)
     return () => window.clearTimeout(t)
@@ -40,19 +39,17 @@ export default function RateSearch({
 
   return (
     <div>
-      <p className="mb-3 text-sm text-(--color-muted)">
-        搜任意作品直接打分——问卷没抽到的、冷门的都能补上。
-      </p>
+      <p className="mb-3 text-sm text-(--color-muted)">{t.rate.intro}</p>
       <input
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder="搜作品名…"
+        placeholder={t.rate.placeholder}
         className="w-full rounded-lg border border-(--color-line) bg-(--color-surface) px-3 py-2 text-sm outline-none focus:border-(--color-brand)"
       />
 
-      {error && (
+      {error != null && (
         <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm">
-          {error}
+          {errorText(error, lang)}
         </div>
       )}
 
@@ -61,7 +58,7 @@ export default function RateSearch({
           <HitRow key={h.subject_id} hit={h} answer={answers[h.subject_id]} onAnswer={onAnswer} />
         ))}
         {!busy && q.trim() && hits.length === 0 && !error && (
-          <p className="text-sm text-(--color-muted)">没搜到，换个写法试试。</p>
+          <p className="text-sm text-(--color-muted)">{t.rate.noHits}</p>
         )}
       </ul>
     </div>
@@ -78,18 +75,21 @@ function HitRow({
   onAnswer: (id: number, choice: Choice, score?: number) => void
 }) {
   const seen = answer?.choice === 'seen'
+  const { lang, t } = useI18n()
+  // 英文界面显示原名（多为日文/罗马字，是动画圈通用叫法），中文界面优先中文名。
+  const title = lang === 'en' ? hit.name : (hit.name_cn ?? hit.name)
   return (
     <li className="rounded-xl border border-(--color-line) bg-(--color-surface) px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="font-medium">{hit.name_cn ?? hit.name}</span>
+        <span className="font-medium">{title}</span>
         <span className="text-xs text-(--color-muted)">
-          {hit.year} · {hit.done.toLocaleString()} 人看过
-          {hit.bgm_score ? ` · 评分 ${hit.bgm_score.toFixed(1)}` : ''}
+          {hit.year} · {t.rate.watchedBy(hit.done.toLocaleString(t.locale))}
+          {hit.bgm_score ? ` · ${t.rate.score(hit.bgm_score.toFixed(1))}` : ''}
         </span>
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        {CHOICES.map(([c, label]) => (
+        {CHOICES.map((c) => (
           <button
             key={c}
             onClick={() => onAnswer(hit.subject_id, c, c === 'seen' ? (answer?.score ?? 8) : undefined)}
@@ -99,7 +99,7 @@ function HitRow({
                 : 'border-(--color-line) hover:border-(--color-brand)'
             }`}
           >
-            {label}
+            {t.choice[c]}
           </button>
         ))}
 

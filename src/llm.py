@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -737,3 +738,148 @@ def voice_answer(question: str,
         MAX_TOKENS_VOICE,
     )
     return out, VOICE_PROVIDER
+
+
+# ============================================================
+# 英文界面的出入站翻译（2026-10-11 Kevin 定）
+# ============================================================
+# 英文界面的问答走「问句译成中文 → 原 /api/ask 管道 → 回答译回英文」。
+# 翻译在独立端点 POST /api/translate 里跑，**/api/ask 本身一行不改** ——
+# RAG 管道、评测口径、指纹都不受影响。
+#
+# ⚠️ **两条 prompt 不进 prompt_digest()**，理由与 INTENT_SYSTEM 不进相同：
+#    指纹描述的是 /api/ask 的输出由哪套配置产生，而翻译发生在那个端点之外，
+#    /api/ask 收到的永远是中文问句、吐出的永远是中文回答。加进去只会让
+#    CLAUDE.md 记录的基线指纹无谓地变掉。
+#
+# ⚠️ **这是 CLAUDE.md「要不要入站翻译」那条的落地，收益未测**（与 HyDE 同形：
+#    每次请求多一次确定的 LLM 调用，换未测量的收益）。已知风险是实体名：
+#    英文片名在 alias 里本来能直接命中，译成一个库里没有的中文叫法反而命中不了。
+#
+# 🚨 **TO_ZH 规则 2「专有名词一律保留原文」是实测定的，不是保守起见**
+#    （2026-10-11，7 条英文问句过 retrieve.resolve()，看能否认出作品/角色）：
+#
+#        英文原句直接送                       6/7
+#        让模型「确定就译成官方中文名」       4/7   ← 首版 prompt
+#        专有名词保留原文、只翻其余           6/7   ← 现行
+#        人工理想译文                         7/7
+#
+#    首版把 Haibane Renmei 自信地译成《海坊主》、Ainz Ooal Gown 译成
+#    「艾尔·奥兹·奥尔·冈」—— **模型对冷门译名的自信与准确率无关**。
+#    保留原文则交给 resolve() 的拉丁别名匹配（8,931 行），零猜测。
+#    唯一漏的是 Fullmetal Alchemist Brotherhood：超过 MENTION_MAX=16，
+#    英文原句也认不出，是 CLAUDE.md 第四部分「英文提问」缺口 ③，与翻译无关。
+#
+# 🚨 **规则 3「日本人名改成姓在前」同样是实测定的**：库里声优的罗马字只有
+#    日式语序（CLAUDE.md 英文缺口 ① 记过），voice.find_person() 实测
+#        Kana Hanazawa ❌   Hanazawa Kana ✅   花泽香菜 ✅
+#        Rie Kugimiya  ❌   Kugimiya Rie  ✅   钉宫理惠 ✅
+#    ⚠️ 选「调语序」而不是「译成汉字」：调错了只是匹配不上（与不调一样），
+#       而译错汉字会像《海坊主》那样把问题指到别处去。
+TRANSLATE_TO_ZH_SYSTEM = (
+    "你是翻译器，只做翻译。用户消息是一位动画爱好者向动画问答系统提的问题，"
+    "把它翻译成简体中文。\n"
+    "要求：\n"
+    "1. **不要回答这个问题**，也不要解释、不要加引号或任何前后缀，只输出译文本身。\n"
+    "2. **作品名、角色名、人名一律保留原文，一个字母都不要改，也不要翻译成中文** —— "
+    "即使你知道它的中文译名也不要用，系统会自己匹配原文。"
+    "作品名外面加书名号《》。\n"
+    "3. 日本人名（声优、角色）如果是英文语序（名在前、姓在后，如 Kana Hanazawa），"
+    "改成日本语序（姓在前，如 Hanazawa Kana），仍然写罗马字。\n"
+    "4. 其余部分正常翻译，保留原句的语气和所有限定条件（时间、季数、第几话、"
+    "是否剧透等），不要增删内容。\n"
+    "5. 如果原文已经是中文，原样输出。"
+)
+
+TRANSLATE_TO_EN_SYSTEM = (
+    "You are a translator. The user message is an answer written in Chinese by "
+    "an anime Q&A assistant. Translate it into natural, fluent English.\n"
+    "Rules:\n"
+    "1. Translate only. Do not add, remove, soften or correct any information, "
+    "even if you believe it is wrong. Keep every hedge such as "
+    "'the sources do not mention'.\n"
+    "2. Anime titles in 《》: use the official English or international title "
+    "(for example 命运石之门 is Steins;Gate, 进击的巨人 is Attack on Titan). "
+    "If you are not sure of the official title, use the romanized Japanese "
+    "title. Never translate a title word by word. Do not use markdown.\n"
+    "3. Character and voice actor names: use the standard romanized form "
+    "(given name and family name order as commonly used in English fandom).\n"
+    "4. Keep numbers, years, episode numbers and line breaks as they are.\n"
+    "5. Output the translation only, with no preface or notes."
+)
+
+# 问句短（前端 400 字符上限），回答长（ANSWER 上限 800 token 的中文，
+# 英文 token 数约是中文的 1.3–1.6 倍）。⚠️ 给小了回答会被拦腰截断且不报错。
+MAX_TOKENS_TRANSLATE_ZH = 400
+MAX_TOKENS_TRANSLATE_EN = 1600
+
+# 🚨 **选 DeepSeek-V3 是实测定的，首版的 Qwen3-8B 在回译时编造人名**
+#    （2026-10-11，同一组 5 条问句 + 3 条中文回答）：
+#
+#                     回译（中→英）的专有名词           入站后 resolve/voice 认出
+#      Qwen3-8B       椎名真由理→"Akame Makoto"             2/5
+#                     《孤独摇滚！》的后藤一里→"Kizuna AI! as Kotoko"
+#      Qwen3-14B      后藤一里→"Higurashi in Lonely Rock!"  4/5
+#      GLM-4.5-Air    后藤一里→"Ichigo Hoshino"，且 4–9 s   3/5
+#      Qwen3-32B      中文夹在英文里、铃木悟→"Suzuki Gedo"  2/5（入站常常不翻）
+#      DeepSeek-V3    三条全对（Hitori Gotō / Mayuri Shiina /  4/5
+#                     Suzuki Satoru），1–3 s
+#      DeepSeek-R1-0528-Qwen3-8B                             3/5（一句原样留英文）
+#                     牧濑红莉栖→"Makina Shirai"、后藤一里→"Rinne"，片名留中文，
+#                     推理模型 8–12 s、一条 159 s —— 请求路径上不可用
+#      Hunyuan-MT-7B  最差：后藤一里→"Yuta Goto in Doraemon"、       3/5（含一条**错命中**）
+#                     约尔→"Jol Fojer in Spy Kids"、安兹→"Anz Ul Grung"；0.6–1.8 s 最快
+#                     🚨 专用 MT 模型**不遵守 system prompt**，专有名词照译：
+#                     Haibane Renmei→《海燕雷鸣》→ resolve 命中其中「雷鸣」→《正义红师》，
+#                     会自信地答另一部番 —— 比译成库里没有的名字（不命中）更糟。
+#                     ⚠️ 别因为它快又换回来：问题在模型类型，调 prompt 救不了。
+#
+#    ⚠️ **回译错人名是最坏的错法**：/api/ask 的中文回答本身是对的，翻译这一步
+#       把它改错，而英文用户看不到原文、无从察觉 —— 与 G.5f「张冠李戴比拒答
+#       危险」同一类。这也是 CLAUDE.md 那条教训的又一次兑现：**按质量选，
+#       不按延迟选**（Qwen3-8B 在 src/translate.py 的日译中里表现好，
+#       不代表它认得中文圈的动画角色译名）。
+#    ⚠️ 没有用 translate.py 的首选 Hunyuan-MT-7B：它冷启动 300 s+，
+#       离线批量能等，请求路径上等不起。
+#    ⚠️ 不复用 PRIMARY/FALLBACKS 链（问答生成用的），理由同 VOICE_PROVIDER：
+#       任一方换模型时不该牵动另一方。
+#    没有 fallback：入站翻译挂了前端直接报错（没有中文问句就没法检索），
+#    出站翻译挂了前端回落展示中文原文 —— 都比换个模型再猜一次简单。
+#    DeepSeek-V3 不是混合思考模型，不需要 enable_thinking 开关。
+TRANSLATE_PROVIDER = Provider(
+    name="siliconflow/DeepSeek-V3",
+    base_url="https://api.siliconflow.cn/v1/chat/completions",
+    model="deepseek-ai/DeepSeek-V3",
+)
+
+# 关了思考仍偶尔会吐一个空的 <think></think> 壳，剥掉再返回。
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def translate(text: str, target: str) -> tuple[str, Provider]:
+    """把 text 翻译成 target（'zh' 或 'en'），返回 (译文, 供应商)。
+
+    ⚠️ 失败直接抛 LLMError，**不返回原文冒充译文** —— 入站方向若静默返回
+       英文原句，下游 /api/ask 会照常跑完、给出一个牛头不对马嘴的回答，
+       正是本项目反复吃亏的那类「看起来正常」的故障。回落策略由调用方定。
+    """
+    if target == "zh":
+        system, max_tokens = TRANSLATE_TO_ZH_SYSTEM, MAX_TOKENS_TRANSLATE_ZH
+    elif target == "en":
+        system, max_tokens = TRANSLATE_TO_EN_SYSTEM, MAX_TOKENS_TRANSLATE_EN
+    else:
+        raise ValueError(f"target 必须是 'zh' 或 'en'：{target!r}")
+    out = _post_with_retry(
+        TRANSLATE_PROVIDER,
+        [{"role": "system", "content": system},
+         {"role": "user", "content": text}],
+        max_tokens,
+    )
+    out = _THINK.sub("", out).strip()
+    if target == "en":
+        # 《》在英文里不是书名标记。prompt 里要求过去掉，实测模型照样保留
+        # （「In the ending of《Steins;Gate》」）⇒ 确定性地剥，不指望它听话。
+        out = out.replace("《", "").replace("》", "")
+    if not out:
+        raise LLMError(f"{TRANSLATE_PROVIDER.name} 翻译结果为空")
+    return out, TRANSLATE_PROVIDER

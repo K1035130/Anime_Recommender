@@ -2207,6 +2207,108 @@ level 恒为一位 ⇒ 第一个字符就是它、其余全是正文，无歧义
 
 ---
 
+### ✅ 英文界面（2026-10-11，Kevin 提出）
+
+**需求**：英文界面，只改前端；问答把英文提问用翻译 API 转中文后走 RAG。
+**Kevin 定的三件事**（AskUserQuestion，都选了推荐项）：
+① 翻译放后端小端点（浏览器直连 SiliconFlow 会暴露 key，embedding/LLM/rerank
+   共用那一个 key，被刷光就全站停）② 回答再译回英文 ③ 列表片名显示原名 `name`。
+
+**改动面**：
+
+```
+后端  src/llm.py        TRANSLATE_PROVIDER + 两条 prompt + translate()
+      server/main.py    POST /api/translate（要登录、不扣配额、失败 503）
+      server/schemas.py TranslateRequest：zh 方向 ≤500 字符、en 方向 ≤4000
+      tests/test_translate.py  14 项（mock 网络）
+前端  messages.ts / i18n.tsx / i18n-context.ts / errors.ts（新）
+      api.ts            ApiError 带 status；translate()
+      AskPanel.tsx      三段式：translating-question → asking → translating-answer
+      其余 7 个组件      文案全部走 t.*
+      usageNotice.ts    USAGE_NOTICE_EN
+```
+
+🚨 **/api/ask 一行没改**。管道、意图校验、配额、指纹全部原样 —— 管道永远只见中文。
+多轮历史回传的也是**中文**问句与**中文**回答（`Turn.questionZh`），否则 J 节的
+代词消解与作用域继承会对英文用户静默失效。
+
+#### 🚨 实测一：专有名词必须保留原文（首版 prompt 被推翻）
+
+首版 prompt 写「确定官方中文译名就用译名，拿不准保留原文」。7 条问句过
+`retrieve.resolve()`：
+
+```
+英文原句直接送                     6/7
+「确定就用译名」（首版）            4/7    Haibane Renmei →《海坊主》
+                                          Ainz Ooal Gown → 艾尔·奥兹·奥尔·冈
+「专有名词保留原文、只翻其余」      6/7    ← 现行
+人工理想译文                       7/7
+```
+
+📌 **模型对冷门译名的自信与准确率无关** —— 它把《灰羽联盟》译成《海坊主》时毫不犹豫。
+保留原文交给 alias 的拉丁别名匹配，零猜测。这正是 CLAUDE.md 第四部分
+「实体链接不该靠翻译」那条的实测兑现。唯一漏的 Fullmetal Alchemist Brotherhood
+是 `MENTION_MAX=16` 卡的（英文缺口 ③），英文原句也漏，与翻译无关。
+
+声优另有一条：库里罗马字只有日式语序，`voice.find_person()` 实测
+`Kana Hanazawa ❌ / Hanazawa Kana ✅ / 花泽香菜 ✅`（钉宫、宫野同样）⇒ prompt 加
+「日本人名改成姓在前」。⚠️ 选**调语序**不选**译汉字**：调错了只是匹配不上，
+译错汉字会像《海坊主》那样把问题指到别处。⚠️ **模型执行得不稳定**（DeepSeek-V3
+调了 Hanazawa、没调 Kugimiya）⇒ 使用须知里直接教用户写姓在前。
+
+#### 🚨 实测二：翻译模型选 DeepSeek-V3（Qwen3-8B 回译编造人名）
+
+首版用 Qwen3-8B（src/translate.py 日译中里验证过）。回译实测把**正确的中文回答
+译错了**：椎名真由理 → "Akame Makoto"、《孤独摇滚！》的后藤一里 →
+"Kizuna AI! as Kotoko"。⇒ 5 个模型同题横比（5 问句 + 3 回答）：
+
+```
+              回译专有名词                        入站后认出
+Qwen3-8B      编造（见上）                         2/5
+Qwen3-14B     后藤一里 → Higurashi                 4/5
+GLM-4.5-Air   后藤一里 → Ichigo Hoshino，4–9 s      3/5
+Qwen3-32B     中文夹在英文里、铃木悟 → Suzuki Gedo  2/5（入站常不翻）
+DeepSeek-V3   三条全对，1–3 s                       4/5
+R1-0528-Qwen3-8B  红莉栖→Makina Shirai、片名留中文     3/5，8–12 s，一条 159 s
+Hunyuan-MT-7B 后藤一里→"Yuta Goto in Doraemon"        3/5（含一条错命中），0.6–1.8 s
+```
+
+（后两行是 Kevin 追问后补测的。）🚨 **Hunyuan-MT-7B 快但不能用**：专用 MT 模型不遵守
+system prompt，专有名词照译 —— Haibane Renmei →《海燕雷鸣》→ resolve 命中其中「雷鸣」
+→《正义红师》，会**自信地答另一部番**，比译成库里没有的名字（干脆不命中）更糟。
+问题在模型类型，调 prompt 救不了。Kevin 定：保持 DeepSeek-V3。
+
+🚨 **回译错人名是最坏的错法**：/api/ask 答对了，翻译把它改错，而英文用户看不到
+原文、无从察觉 —— 与 G.5f「张冠李戴比拒答危险」同一类。又一次「按质量选，不按延迟选」。
+⚠️ 冷门角色的罗马字仍是模型猜的（雪柳红梅 → "Setsuyan Kōbai"），没有数据源可对。
+
+#### 端到端（TestClient 旁路登录/配额 ⇒ 零写库；LLM/检索/翻译全真实）
+
+```
+Haibane Renmei 讲了什么      ask    37 s（回译 12 s）  ✅ 英文通顺，Rakka/Kuro 正确
+Hanazawa Kana 最近配了什么   voice  24 s               ✅ 但回答里漏出「角色名缺失」占位符
+十年前这个季度              season  3 s                ✅ 2016-10 共 138 部
+主角很强但低调              find    6 s                ✅ 第一个是《想要成为影之实力者！》
+```
+
+⚠️ voice 那条的「（角色名缺失）」占位符**在中文回答里就有**，是 VOICE_SYSTEM 规则 5
+没被 8B 遵守，与翻译无关（译成了 "[character name missing]"）。
+
+#### 已知缺口（都是有意留的）
+
+- ⚠️ **列表片名仍是中文**。Kevin 选了「显示原名 `name`」，但问卷 / 推荐 / 找番 /
+  voice 列表的 `name` 字段**后端就已经是 `COALESCE(name_cn, name)`**（recommend_sql
+  等处），前端拿不到原名。只有搜索、个人页、档期列表带 `name_cn` 与 `name` 两列，
+  那几处生效了。要彻底解决得改后端返回字段（与「英文名回填」那条一起做最划算）。
+- 作品简介、推荐理由 tag、出处原文、`route_reason` 仍是中文。出处**有意不译**
+  （它的用途是核对，译了就不是原文）；`route_reason` 英文轮直接不显示。
+- `/api/translate` 可被已登录用户绕开 /api/ask 单独调用，只有长度上限挡着。
+- 两条翻译 prompt **不进 `prompt_digest()`**（同 INTENT_SYSTEM：发生在 /api/ask 之外），
+  由 `test_translate_prompts_not_in_digest` 锁住，基线指纹未变。
+- CLAUDE.md 第四部分建议的「150 题翻成英文重跑」A/B **没做**。
+
+---
+
 ### ✅ 前端：提问框旁边放一个问号按钮，唤起「使用须知」（2026-08-24 已做）
 
 **已实现**：`web/src/usageNotice.ts`（纯文本原文）+ `AskPanel.tsx` 里输入框

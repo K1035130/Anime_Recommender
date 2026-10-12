@@ -116,7 +116,27 @@ POST /api/ask       ⬆️ 现在是**单一入口**：自动分派 voice / seas
 ② 词表策略（季度冻结 / 每年重建）。
 其余候选仍是下面「下一件事」那三条 + 推荐加热度权重（前置已解除）。
 
-## 👤 最新一轮：个人中心页（2026-08-24，Kevin 提出）
+## 🌐 最新一轮：英文界面（2026-10-11，Kevin 提出）
+
+中英切换（顶栏「EN | 中文」分段按钮，记在 localStorage，**没选过一律英文**——
+Kevin 定，不按浏览器语言猜）。问答走
+**「问句译中 → 原 /api/ask → 回答译英」**，`/api/ask` 一行不改。
+后端只加了 `POST /api/translate`（要登录、不扣配额、按方向限长）+ `llm.translate()`。
+测试 329 → **343**。**完整记录见 docs/history.md「英文界面」那一节**，先知道的：
+
+```
+🚨 专有名词保留原文不翻     模型自信地译错：Haibane Renmei →《海坊主》（resolve 4/7 → 6/7）
+🚨 翻译模型是 DeepSeek-V3   Qwen3-8B 回译时编造人名（后藤一里 → "Kizuna AI! as Kotoko"）
+⚠️ 列表片名仍是中文         问卷/推荐/找番的 name 字段后端就是中文名，纯前端改不了
+⚠️ /api/translate 可被单刷  已登录用户能绕开 /api/ask 单独调，目前只有长度上限挡着
+```
+
+📌 **人工审核表 [docs/eval-translate-sample.md](docs/eval-translate-sample.md)**（14 题真实调用）。
+发现的两处入站漏召回 **Kevin 判为可接受误差，不修**：
+「opening song」译成「开场曲」不触发 `SONGS_SEAT`（触发词只认 片头/片尾/主题曲/插曲/OP/ED）；
+`kurisu makise`（名在前）认不出《命运石之门》。回译有个别冷门人名译错（天王寺绹 → "Towa"，应为 Nae）。
+
+## 👤 上一轮：个人中心页（2026-08-24，Kevin 提出）
 
 登录后的个人页：账号信息 + 改用户名/改密码 + 查看和修改已打分的动画。
 `web/src/AccountPage.tsx` + 三个端点（`GET /api/ratings/detail` ·
@@ -187,7 +207,10 @@ AccountPage.tsx    个人中心：账号信息 + 改用户名/改密码 + 已打
                       `hidden sm:inline`，否则小屏上没有入口
 session.tsx        🚨 会话与评分的**单一入口**，见下
 session-context.ts context 与 hook（与 provider 分文件是为了 Fast Refresh）
-usageNotice.ts     问号按钮唤起的使用须知纯文本
+usageNotice.ts     问号按钮唤起的使用须知纯文本（中英两版，英文版按英文路径改写，非逐字翻译）
+messages.ts        界面文案中英字典。⚠️ en 的类型是 typeof zh —— 漏翻 tsc 直接报错
+i18n.tsx / i18n-context.ts   语言 provider 与 hook（分文件理由同 session）
+errors.ts          报错转文案：英文界面**按 HTTP 状态码**给提示，不 match 后端中文 detail
 ```
 
 🚨 **`session.tsx` 是前端最该先读的文件。** 上层组件**不知道用户登没登录** ——
@@ -1476,6 +1499,14 @@ What anime were people watching ten years ago today?
 ⚠️ 且**实体链接不该靠翻译**：alias 里本来就有 8,931 行拉丁 subject 别名，
 直接匹配零成本零延迟，比 MT 猜标题准（`Fullmetal Alchemist Brotherhood`
 译成什么中文是不确定的）——与 G.5g「点名走 alias 直取」同一条。
+
+✅ **2026-10-11 Kevin 定：做入站翻译**（英文界面，见第一部分与 docs/history.md
+「英文界面」）。上面「实体链接不该靠翻译」**被实测证实**，所以 prompt 规定
+**专有名词保留原文不翻**，实体仍走 alias 拉丁别名：7 条问句 resolve 命中
+「译名」4/7 →「保留原文」6/7（= 英文原句）。⇒ 缺口 ① 对 season/ask 自动消失；
+**voice 只消失一半**（模型把名在前的人名调成姓在前，但不稳定）；② ③ 不受影响。
+⬜ 上面那个「150 题翻成英文重跑」的 A/B **仍没做** —— 目前的依据只有 7 条 resolve
+与 4 条端到端，检索/回答质量的影响未量化。
 
 ### ⬜ 同 IP 衍生折叠 —— `/api/related` 32% 的结果是噪声
 

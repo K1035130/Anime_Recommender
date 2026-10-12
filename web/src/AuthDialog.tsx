@@ -1,5 +1,16 @@
 import { useState } from 'react'
+import { errorText } from './errors'
+import { useI18n } from './i18n-context'
 import { useSession } from './session-context'
+
+// 英文界面下按状态码给的专属提示（后端 detail 是中文，见 errors.ts）。
+const EN_ERRORS = {
+  login: { 401: 'Incorrect username or password' },
+  register: {
+    409: 'That username is already taken',
+    422: 'Username must be 2–20 characters (letters, digits, Chinese, _ or -); password at least 8 characters',
+  },
+}
 
 type Mode = 'login' | 'register'
 
@@ -18,6 +29,7 @@ export default function AuthDialog({
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { lang, t } = useI18n()
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -28,7 +40,7 @@ export default function AuthDialog({
       else await register(username.trim(), password)
       onClose()
     } catch (err) {
-      setError(String((err as Error).message ?? err))
+      setError(errorText(err, lang, EN_ERRORS[mode]))
     } finally {
       setBusy(false)
     }
@@ -45,23 +57,23 @@ export default function AuthDialog({
         className="w-full max-w-sm rounded-2xl border border-(--color-line) bg-(--color-surface) p-6"
       >
         <div className="mb-1 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">{mode === 'login' ? '登录' : '注册'}</h2>
+          <h2 className="text-lg font-semibold">{mode === 'login' ? t.auth.login : t.auth.register}</h2>
           <button
             type="button"
             onClick={onClose}
             className="text-sm text-(--color-muted) hover:text-(--color-ink)"
           >
-            关闭
+            {t.auth.close}
           </button>
         </div>
 
         <p className="mb-4 text-xs leading-relaxed text-(--color-muted)">
-          {hint ?? '登录后评分会保存到账号，换设备也能用。'}
+          {hint ?? t.auth.hintDefault}
           {answered > 0 && (
             <>
               <br />
-              本机已有 {answered} 部评分，
-              {mode === 'register' ? '注册后会一并保存。' : '登录后会并入账号（不覆盖账号里已有的）。'}
+              {t.auth.localRatings(answered)}
+              {mode === 'register' ? t.auth.mergeRegister : t.auth.mergeLogin}
             </>
           )}
         </p>
@@ -74,7 +86,7 @@ export default function AuthDialog({
 
         <label className="mb-3 block">
           <span className="mb-1 block text-xs text-(--color-muted)">
-            用户名{mode === 'register' && '（2–20 字，可用中文）'}
+            {t.auth.username}{mode === 'register' && t.auth.usernameRule}
           </span>
           <input
             type="text"
@@ -91,7 +103,7 @@ export default function AuthDialog({
 
         <label className="mb-4 block">
           <span className="mb-1 block text-xs text-(--color-muted)">
-            密码{mode === 'register' && '（至少 8 位）'}
+            {t.auth.password}{mode === 'register' && t.auth.passwordRule}
           </span>
           <input
             type="password"
@@ -109,7 +121,7 @@ export default function AuthDialog({
           disabled={busy}
           className="w-full rounded-lg bg-(--color-brand) px-4 py-2 text-sm font-medium text-(--color-on-brand) disabled:opacity-40"
         >
-          {busy ? '处理中…' : mode === 'login' ? '登录' : '注册'}
+          {busy ? t.auth.busy : mode === 'login' ? t.auth.login : t.auth.register}
         </button>
 
         <button
@@ -120,13 +132,13 @@ export default function AuthDialog({
           }}
           className="mt-3 w-full text-center text-xs text-(--color-muted) underline"
         >
-          {mode === 'login' ? '还没有账号？去注册' : '已有账号？去登录'}
+          {mode === 'login' ? t.auth.toRegister : t.auth.toLogin}
         </button>
 
         <p className="mt-4 text-[11px] leading-relaxed text-(--color-muted)">
-          只存用户名和密码哈希，不收邮箱、不存任何其他个人信息。
+          {t.auth.privacy}
           <br />
-          ⚠️ 也因此<strong>没有找回密码的途径</strong>，请记好。
+          {t.auth.noRecoveryPre}<strong>{t.auth.noRecoveryStrong}</strong>{t.auth.noRecoveryPost}
         </p>
       </form>
     </div>

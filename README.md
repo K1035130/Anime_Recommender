@@ -39,6 +39,17 @@ Passwords are hashed with argon2; sessions are JSON Web Tokens held in an
 httpOnly cookie. Ratings sync to the account, and question answering is limited to
 ten questions per 24 hours.
 
+**Interface languages.** The web interface is in English by default and can be
+switched to Chinese from the top bar. The underlying data and the
+question-answering pipeline are Chinese, so an English question is
+machine-translated into Chinese, answered by the unchanged pipeline, and the
+answer is translated back. Titles and character names in the question are kept as
+typed rather than translated: measured on seven questions, translating them let
+the system recognise the intended show 4 times out of 7, keeping them 6 out of 7,
+because the library already holds English and romanized aliases. Lists show the
+official English title where one exists, otherwise the Japanese original; the
+cited sources and questionnaire synopses remain in Chinese.
+
 ### Scale
 
 | | |
@@ -49,7 +60,7 @@ ten questions per 24 hours.
 | 145,306 | voice-acting credits, covering 8,215 voice actors |
 | 19,381 | passages flagged as spoilers and filtered before retrieval |
 | 1,001 MB | Neon Postgres database |
-| 329 | automated tests |
+| 343 | automated tests |
 
 ---
 
@@ -72,7 +83,7 @@ Six items, none of which blocks the others.
 | **Quarterly update** | Refreshing existing titles is close to free: the pipeline is idempotent and skips unchanged rows. The obstacle is admission. New shows are excluded by the `favorite.done >= 50` popularity threshold that guards data quality. The library's latest broadcast date is 2026-09-11, only two titles are scheduled in the future, and all six titles listed for 2027 or later carry no broadcast date at all — so any "airing within N months" rule must handle the missing value. The admission rule and the tag vocabulary policy are decisions to settle before writing code. |
 | **Information-gain question selection** | Questions are currently selected for diversity. Selecting instead by expected information gain would make a fixed number of answers more informative. |
 | **Detail page** | The endpoint `GET /api/anime/{id}` has been available since stage 2; no page in the web interface calls it. |
-| **English-language support** | Broadcast-season queries already accept English. Three gaps remain: voice-actor phrasing is recognised only in Chinese; the maximum recognised title length is shorter than some English titles; and 14 of 33 common English words collide with genuine aliases, so an English description resolves to an unintended title. Because the corpus is Chinese, the cross-language retrieval penalty should be measured before an approach is chosen; translating the existing 150-question evaluation set provides that measurement at almost no cost. |
+| **English-language support** | The English interface shipped on 2026-10-11 (see *Interface languages* above). What remains: its effect on answer quality has been checked by hand on 14 questions but not measured — translating the existing 150-question evaluation set would provide that at almost no cost. Japanese names are matched only in family-name-first order (*Hanazawa Kana*, not *Kana Hanazawa*), and the translation model reorders them inconsistently. Titles longer than the maximum recognised length are missed in either language. Title lists inside question-answering results are still in Chinese. |
 | **Episode synopses** | The source archive contains 108,835 episode descriptions across 10,630 titles, none of which are loaded. They would answer per-episode questions, which currently fail. |
 | **Voice actors as a recommendation signal** | The staff vector covers directors, composers and studios but no voice actors, which require a two-step join through character records. The data is already present from the question-answering feature. Adding it changes the vocabulary size and therefore requires recomputing the library. |
 
@@ -87,7 +98,7 @@ Six items, none of which blocks the others.
 | Chinese tokenization | jieba, applied before insertion — the database cannot install a Chinese tokenizer |
 | Embeddings | Qwen3-Embedding-0.6B, stored as `halfvec(1024)` |
 | Reranking | `BAAI/bge-reranker-v2-m3`, which reorders a retrieved shortlist more accurately than the initial search |
-| Generation | Qwen3-14B for answers; Qwen3-8B for intent classification and phrasing |
+| Generation | Qwen3-14B for answers; Qwen3-8B for intent classification and phrasing; DeepSeek-V3 for translating questions and answers in the English interface |
 | Authentication | argon2id with JSON Web Tokens in an httpOnly cookie |
 | Backend | FastAPI on Vercel serverless functions |
 | Frontend | React, TypeScript, Vite and Tailwind |
@@ -352,6 +363,12 @@ See [LICENSE](LICENSE).
 密码以 argon2 哈希存储，会话是放在 httpOnly cookie 中的 JSON Web Token。
 评分会同步到账号，问答限制为每 24 小时 10 条。
 
+**界面语言。** 网页界面默认英文，可在顶栏切换为中文。底层数据与问答管道都是中文的，
+因此英文提问会先机器翻译成中文，交给原样不变的管道作答，再把回答译回英文。
+问句中的作品名与角色名**保留原文、不翻译**：7 道题实测，翻译后系统能认出目标作品
+4 道，保留原文则 6 道 —— 库里本来就存有英文与罗马字别名。列表中的片名优先显示
+官方英文名，没有时显示日文原名；引用的出处与问卷简介仍为中文。
+
 ### 规模
 
 | | |
@@ -362,7 +379,7 @@ See [LICENSE](LICENSE).
 | 145,306 | 声优配役记录，涉及 8,215 位声优 |
 | 19,381 | 被标记为剧透并在检索前过滤的段落 |
 | 1,001 MB | Neon Postgres 数据库 |
-| 329 | 自动化测试 |
+| 343 | 自动化测试 |
 
 ---
 
@@ -385,7 +402,7 @@ See [LICENSE](LICENSE).
 | **季度更新** | 更新已有作品的成本接近于零：管道幂等，且会跳过未变化的记录。障碍在准入。新番会被 `favorite.done >= 50` 这条保障数据质量的热度门槛排除在外。库中最晚的播出日期是 2026-09-11，未来待播的只有两部，而所有标记为 2027 年及以后的六部作品**都没有播出日期** —— 因此任何「未来 N 个月内开播」的规则都必须处理缺失值。准入规则与标签词表策略是动手之前要先定下的两个决策。 |
 | **信息增益选题** | 目前按多样性选题。改为按预期信息增益选题，可以让同样数量的作答提供更多信息。 |
 | **详情页** | `GET /api/anime/{id}` 自阶段 2 起即可用，但网页界面中没有任何页面调用它。 |
-| **英文支持** | 档期查询已支持英文。仍有三处缺口：声优类问法只能识别中文；可识别的标题长度上限短于部分英文标题；33 个常见英文词中有 14 个与真实别名冲突，导致英文描述被解析成非预期的作品。由于语料是中文的，应先度量跨语言检索的损失再选择方案 —— 把现有的 150 题评测集译成英文即可得到这一度量，成本极低。 |
+| **英文支持** | 英文界面已于 2026-10-11 上线（见上文「界面语言」）。剩下的：对回答质量的影响只人工检查过 14 道题、尚未量化 —— 把现有的 150 题评测集译成英文即可度量，成本极低。日文人名只能按姓在前的语序匹配（*Hanazawa Kana* 而非 *Kana Hanazawa*），翻译模型调换语序并不稳定。超过可识别长度上限的标题在两种语言下都会漏认。问答结果里的片名列表仍为中文。 |
 | **单集简介** | 源数据中含有 108,835 条分集简介，涉及 10,630 部作品，目前一条都未导入。它们可以回答按集提问的问题，而这类问题目前无法回答。 |
 | **声优作为推荐信号** | 制作人员向量涵盖导演、音乐与制作公司，但不含声优 —— 声优需要经由角色记录做两步关联。数据已因问答功能而具备。引入它会改变词表规模，因而需要重算全库。 |
 
@@ -400,7 +417,7 @@ See [LICENSE](LICENSE).
 | 中文分词 | jieba，在入库前完成 —— 该托管数据库无法安装中文分词扩展 |
 | Embedding | Qwen3-Embedding-0.6B，以 `halfvec(1024)` 存储 |
 | 重排 | `BAAI/bge-reranker-v2-m3`，对检索出的候选列表做比初检更精确的重新排序 |
-| 生成 | Qwen3-14B 负责回答；Qwen3-8B 负责意图分类与文案组织 |
+| 生成 | Qwen3-14B 负责回答；Qwen3-8B 负责意图分类与文案组织；DeepSeek-V3 负责英文界面的问句与回答翻译 |
 | 认证 | argon2id，JSON Web Token 存于 httpOnly cookie |
 | 后端 | FastAPI，运行于 Vercel serverless 函数 |
 | 前端 | React、TypeScript、Vite、Tailwind |

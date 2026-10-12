@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { api, type Mode, type RankBy, type Recommendation } from './api'
 import { errorText } from './errors'
-import { useI18n } from './i18n-context'
+import { englishTitle, useI18n } from './i18n-context'
 import type { AnswerMap } from './storage'
 import { toAnswers } from './storage'
 
@@ -98,7 +98,8 @@ export default function RecommendResults({ answers }: { answers: AnswerMap }) {
 }
 
 function RecRow({ rec, rank }: { rec: Recommendation; rank: number }) {
-  const { t } = useI18n()
+  const { lang, t } = useI18n()
+  const title = lang === 'en' ? englishTitle(rec.name_en, rec.name_original ?? rec.name) : rec.name
   return (
     <li className="flex gap-3 rounded-xl border border-(--color-line) bg-(--color-surface) px-3 py-2.5">
       <span className="w-6 shrink-0 pt-0.5 text-sm tabular-nums text-(--color-muted)">
@@ -112,7 +113,7 @@ function RecRow({ rec, rank }: { rec: Recommendation; rank: number }) {
             rel="noreferrer"
             className="font-medium hover:text-(--color-brand) hover:underline"
           >
-            {rec.name}
+            {title}
           </a>
           <span className="text-xs text-(--color-muted)">{rec.year}</span>
         </div>

@@ -78,6 +78,10 @@ class Item:
     form: str | None
     replaced_from: int | None = None    # 若由某部续作折叠而来，记下原始 id
     summary: str | None = None          # 卡片简介，已截断到 SUMMARY_MAX_CHARS
+    # 英文界面用（2026-10-11）：`name` 是 COALESCE(name_cn, name)，英文界面
+    # 要的是官方英文名 → 原名。⚠️ 加在末尾、带默认值，既有构造点不用改。
+    name_original: str | None = None
+    name_en: str | None = None
 
 
 def _truncate(s: str | None, n: int = SUMMARY_MAX_CHARS) -> str | None:
@@ -136,7 +140,8 @@ def select_items(conn: psycopg.Connection, n: int = 30, *,
     with conn.cursor() as cur:
         cur.execute("""
             SELECT subject_id, COALESCE(name_cn, name), air_year, fav_done, form,
-                   nsfw, COALESCE(series_root, subject_id), mmr_rank, summary
+                   nsfw, COALESCE(series_root, subject_id), mmr_rank, summary,
+                   name, name_en
             FROM anime_profile
             ORDER BY fav_done DESC
         """)
@@ -149,7 +154,7 @@ def select_items(conn: psycopg.Connection, n: int = 30, *,
 
     skip = frozenset(exclude)
     picked: dict[int, Item] = {}
-    for sid, name, year, done, form, nsfw, sroot, _rank, summary in rows:
+    for sid, name, year, done, form, nsfw, sroot, _rank, summary, orig, en in rows:
         if not include_nsfw and nsfw:
             continue
         if form not in POOL_FORMS:
@@ -159,7 +164,8 @@ def select_items(conn: psycopg.Connection, n: int = 30, *,
             continue
         r = meta.get(root)
         if r is None:                      # 根不在候选集里（极少），退回本作
-            root, r = sid, (sid, name, year, done, form, nsfw, sid, None, summary)
+            root, r = sid, (sid, name, year, done, form, nsfw, sid, None, summary,
+                            orig, en)
         if not include_nsfw and r[5]:      # 根是 nsfw 则整条系列跳过
             continue
         # ⚠️ 年份卡在**根节点**上，不是原作品上。折叠后展示的是根，
@@ -170,7 +176,8 @@ def select_items(conn: psycopg.Connection, n: int = 30, *,
         picked[root] = Item(subject_id=root, name=r[1], year=r[2], done=r[3],
                             form=r[4],
                             replaced_from=sid if root != sid else None,
-                            summary=_truncate(r[8]))
+                            summary=_truncate(r[8]),
+                            name_original=r[9], name_en=r[10])
 
     # ⚠️ **按 mmr_rank 排，不再按热度。**（2026-08-14 改，见 sql/005_mmr_rank.sql）
     #    纯热度选出来的题目彼此高度相似 —— 实测 30 题两两余弦均值 0.4552，

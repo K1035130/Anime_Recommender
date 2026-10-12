@@ -156,6 +156,7 @@ class RatedDetail:
     form: str | None
     fav_done: int | None
     bgm_score: float | None
+    name_en: str | None = None          # 英文界面用（2026-10-11）；name 本来就是原名
 
 
 def list_detailed(conn: psycopg.Connection, user_id: int) -> list[RatedDetail]:
@@ -180,7 +181,7 @@ def list_detailed(conn: psycopg.Connection, user_id: int) -> list[RatedDetail]:
             """
             SELECT r.subject_id, r.choice, r.score, r.source, r.updated_at,
                    a.name, a.name_cn, a.air_year, a.form, a.fav_done,
-                   a.score AS bgm_score
+                   a.score AS bgm_score, a.name_en
               FROM user_rating r
               JOIN anime_profile a USING (subject_id)
              WHERE r.user_id = %s
@@ -193,8 +194,9 @@ def list_detailed(conn: psycopg.Connection, user_id: int) -> list[RatedDetail]:
                 subject_id=sid, choice=ch, score=sc, source=src,
                 updated_at=upd.isoformat(),
                 name=name, name_cn=name_cn, air_year=year, form=form,
-                fav_done=done, bgm_score=bgm,
+                fav_done=done, bgm_score=bgm, name_en=name_en,
             )
-            for (sid, ch, sc, src, upd, name, name_cn, year, form, done, bgm)
+            for (sid, ch, sc, src, upd, name, name_cn, year, form, done, bgm,
+                 name_en)
             in cur.fetchall()
         ]

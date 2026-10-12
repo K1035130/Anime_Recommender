@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type Choice, type SearchHit } from './api'
 import { errorText } from './errors'
-import { useI18n } from './i18n-context'
+import { englishTitle, useI18n } from './i18n-context'
 import type { AnswerMap } from './storage'
 
 const CHOICES: Choice[] = ['seen', 'wish', 'pass']
@@ -76,8 +76,8 @@ function HitRow({
 }) {
   const seen = answer?.choice === 'seen'
   const { lang, t } = useI18n()
-  // 英文界面显示原名（多为日文/罗马字，是动画圈通用叫法），中文界面优先中文名。
-  const title = lang === 'en' ? hit.name : (hit.name_cn ?? hit.name)
+  // 英文界面：官方英文名 → 原名；中文界面优先中文名。
+  const title = lang === 'en' ? englishTitle(hit.name_en, hit.name) : (hit.name_cn ?? hit.name)
   return (
     <li className="rounded-xl border border-(--color-line) bg-(--color-surface) px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type Choice, type Experience, type QuestionItem } from './api'
 import { errorText } from './errors'
-import { useI18n } from './i18n-context'
+import { englishTitle, useI18n } from './i18n-context'
 import type { AnswerMap } from './storage'
 
 // 开场问题：先问资历，决定后面出题的年份回溯窗口（不影响推荐范围本身，
@@ -90,15 +90,22 @@ export default function QuestionnaireCards({
 
   const current = items[index]
   const answer = answers[current.subject_id]
+  const isEn = lang === 'en'
+  const title = isEn ? englishTitle(current.name_en, current.name_original ?? current.name) : current.name
   const isLast = index === items.length - 1
 
   return (
     <QuizBox
       eyebrow={t.quiz.questionOf(index + 1, items.length)}
       progress={(index + 1) / items.length}
-      title={current.name}
+      title={title}
       subtitle={`${current.year ?? ''}${current.year ? ' · ' : ''}${t.quiz.watchedBy(current.done.toLocaleString(t.locale))}`}
-      body={<p className="mt-3 text-sm leading-relaxed text-(--color-muted)">{current.summary ?? t.quiz.noSummary}</p>}
+      // ⚠️ 简介只有中文，英文界面不显示（2026-10-11 Kevin 定，不机翻入库）。
+      body={
+        isEn ? undefined : (
+          <p className="mt-3 text-sm leading-relaxed text-(--color-muted)">{current.summary ?? t.quiz.noSummary}</p>
+        )
+      }
       onPrev={goPrev}
       onNext={isLast ? () => onFinish?.() : () => goTo(index + 1)}
       nextDisabled={!answer}

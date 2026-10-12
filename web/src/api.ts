@@ -24,6 +24,10 @@ export interface QuestionItem {
   form: string | null
   replaced_from: number | null
   summary: string | null
+  // ⚠️ `name` 是中文名（COALESCE(name_cn, name)），下面两个给英文界面用。
+  // 英文界面用（2026-10-11）：官方英文名 → 原名，见 i18n-context.ts::englishTitle
+  name_original?: string | null
+  name_en?: string | null
 }
 
 /**
@@ -41,6 +45,10 @@ export interface Recommendation {
   bgm_score: number | null
   done: number
   reasons: string[] // 对匹配度贡献最大的 tag
+  // ⚠️ `name` 是中文名（COALESCE(name_cn, name)），下面两个给英文界面用。
+  // 英文界面用（2026-10-11）：官方英文名 → 原名，见 i18n-context.ts::englishTitle
+  name_original?: string | null
+  name_en?: string | null
 }
 
 export interface SearchHit {
@@ -52,6 +60,7 @@ export interface SearchHit {
   done: number
   bgm_score: number | null
   via: 'tsv' | 'trgm'
+  name_en?: string | null // 英文界面用；这里的 `name` 本来就是原名
 }
 
 /**
@@ -100,6 +109,7 @@ export interface RatedItem {
   form: string | null
   fav_done: number | null
   bgm_score: number | null
+  name_en?: string | null // 英文界面用；这里的 `name` 本来就是原名
 }
 
 export interface RatedListResponse {

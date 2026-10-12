@@ -305,7 +305,8 @@ def get_questionnaire(
             schemas.QuestionItem(
                 subject_id=it.subject_id, name=it.name, year=it.year,
                 done=it.done, form=it.form, replaced_from=it.replaced_from,
-                summary=it.summary,
+                summary=it.summary, name_original=it.name_original,
+                name_en=it.name_en,
             )
             for it in items
         ]
@@ -324,7 +325,8 @@ def get_questionnaire(
             schemas.QuestionItem(
                 subject_id=it.subject_id, name=it.name, year=it.year,
                 done=it.done, form=it.form, replaced_from=it.replaced_from,
-                summary=it.summary,
+                summary=it.summary, name_original=it.name_original,
+                name_en=it.name_en,
             )
             for it in fresh
         ][:n]
@@ -393,7 +395,9 @@ def post_recommend(req: schemas.RecommendRequest) -> schemas.RecommendResponse:
         norm = pref / (float((pref @ pref) ** 0.5) or 1.0)
         reasons = recommend_sql.explain(c, norm, ids)
         with c.cursor() as cur:
-            cur.execute("SELECT subject_id, air_year, score, fav_done "
+            # ⚠️ 英文界面的两个片名字段放在**这条展示查询**里取，不碰打分路径
+            #    （recommend_sql 的 name 与 numpy 路径受 test_parity 锁定）。
+            cur.execute("SELECT subject_id, air_year, score, fav_done, name, name_en "
                         "FROM anime_profile WHERE subject_id = ANY(%s)", (ids,))
             meta = {r[0]: r for r in cur.fetchall()}
 
@@ -406,6 +410,8 @@ def post_recommend(req: schemas.RecommendRequest) -> schemas.RecommendResponse:
                        if meta[r.subject_id][2] else None),
             done=meta[r.subject_id][3],
             reasons=reasons.get(r.subject_id, []),
+            name_original=meta[r.subject_id][4],
+            name_en=meta[r.subject_id][5],
         )
         for r in recs
     ]
@@ -413,9 +419,13 @@ def post_recommend(req: schemas.RecommendRequest) -> schemas.RecommendResponse:
                                      rank_by=req.rank_by)
 
 
+# ⚠️ name_en 必须放在**末尾**之前的固定位置 —— 下面 trgm 分支按列位置排序
+#    （r[_SIM]），_hit() 也按位置解包。加列时两处一起改。
 _SEARCH_COLS = """
-    p.subject_id, p.name, p.name_cn, p.air_year, p.form, p.fav_done, p.score
+    p.subject_id, p.name, p.name_cn, p.air_year, p.form, p.fav_done, p.score,
+    p.name_en
 """
+_SIM = 8      # trgm 分支里 similarity 的列位置（紧跟 _SEARCH_COLS 的 8 列）
 
 
 @app.get(f"{API}/search", response_model=list[schemas.SearchHit])
@@ -456,16 +466,17 @@ def search(q: str = Query(min_length=1, max_length=100),
             """, (norm_name(q), norm_name(q), TRGM_MIN_SIM, limit))
             rows = cur.fetchall()
             # DISTINCT ON 强制按 subject_id 排序，相关性排序只能在 Python 侧补
-            rows.sort(key=lambda r: (-r[7], -r[5]))
+            rows.sort(key=lambda r: (-r[_SIM], -r[5]))
             hits = [_hit(r, "trgm") for r in rows]
     return hits
 
 
 def _hit(row: tuple, via: str) -> schemas.SearchHit:
-    sid, name, name_cn, year, form, done, sc = row[:7]
+    sid, name, name_cn, year, form, done, sc, name_en = row[:8]
     return schemas.SearchHit(
         subject_id=sid, name=name, name_cn=name_cn, year=year, form=form,
         done=done, bgm_score=float(sc) if sc else None, via=via,
+        name_en=name_en,
     )
 
 

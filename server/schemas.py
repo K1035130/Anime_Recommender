@@ -43,7 +43,12 @@ class QuestionItem(BaseModel):
     replaced_from: int | None = None
     # 卡片简介，已截断（questionnaire.SUMMARY_MAX_CHARS）。可能为 None——
     # 589 部作品没有 summary（A.9），前端要按缺失处理，不要留白当出错。
+    # ⚠️ 只有中文；英文界面不显示简介（2026-10-11 Kevin 定，不机翻入库）。
     summary: str | None = None
+    # 英文界面用的片名（2026-10-11）。`name` 含义不变（中文界面照旧用它）；
+    # 英文界面显示 name_en（AniList 官方英文名，问卷池覆盖 65%）→ 回落原名。
+    name_original: str | None = None
+    name_en: str | None = None
 
 
 class QuestionnaireResponse(BaseModel):
@@ -71,6 +76,10 @@ class Recommendation(BaseModel):
     # 推荐理由：对匹配度贡献最大的几个 tag（pref[j] × item[j] 降序）。
     # ⚠️ 不是「该作品票数最高的 tag」—— 那与用户无关，解释不了「为什么推给你」。
     reasons: list[str]
+    # 英文界面用的片名（2026-10-11）。`name` 含义不变（中文界面照旧用它）；
+    # 英文界面显示 name_en（AniList 官方英文名，问卷池覆盖 65%）→ 回落原名。
+    name_original: str | None = None
+    name_en: str | None = None
 
 
 class RecommendRequest(BaseModel):
@@ -131,6 +140,7 @@ class SearchHit(BaseModel):
     bgm_score: float | None
     # 命中方式：tsv = BM25 正常命中，trgm = 名字拼错时的模糊兜底
     via: Literal["tsv", "trgm"]
+    name_en: str | None = None     # 英文界面用（2026-10-11）；name 本来就是原名
 
 
 class AnimeDetail(BaseModel):
@@ -481,6 +491,7 @@ class RatedItem(BaseModel):
     # 收藏「看过」的人数，用来给列表提供一个热度感知（与搜索结果同口径）。
     fav_done: int | None = None
     bgm_score: float | None = None
+    name_en: str | None = None     # 英文界面用（2026-10-11）；name 本来就是原名
 
 
 class RatedListResponse(BaseModel):

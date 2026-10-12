@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, UnauthorizedError, type Choice, type RatedItem } from './api'
 import { errorText } from './errors'
-import { useI18n } from './i18n-context'
+import { englishTitle, useI18n } from './i18n-context'
 import { useSession } from './session-context'
 
 const CHOICES: Choice[] = ['seen', 'wish', 'pass']
@@ -633,9 +633,9 @@ function RatedRow({
   const removed = choice === undefined || choice === 'skip'
   const score = current?.score ?? item.score ?? 8
   const { lang, t } = useI18n()
-  // 英文界面主标题用原名、副标题放中文名；中文界面反过来。
-  const title = lang === 'en' ? item.name : (item.name_cn ?? item.name)
-  const subtitle = lang === 'en' ? item.name_cn : item.name
+  // 英文界面：主标题官方英文名 → 原名，副标题放原名；中文界面主标题中文名、副标题原名。
+  const title = lang === 'en' ? englishTitle(item.name_en, item.name) : (item.name_cn ?? item.name)
+  const subtitle = item.name
 
   return (
     <li
@@ -647,7 +647,7 @@ function RatedRow({
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="font-medium">{title}</span>
-        {item.name_cn && item.name !== item.name_cn && (
+        {subtitle !== title && (
           <span className="text-xs text-(--color-muted)">{subtitle}</span>
         )}
       </div>

@@ -71,8 +71,13 @@ def test_token_roundtrip():
 def test_token_tampered_rejected():
     t = auth.make_token(1)
     head, payload, sig = t.split(".")
+    # ⚠️ 不能改末尾：HS256 签名 32 字节 → 43 个 base64url 字符，末位只有 4 bit
+    #    有效、2 bit 是填充。原先「末两位换成 xx」实测约 1/740 解码出同一串
+    #    字节（篡改没生效）⇒ 偶发 DID NOT RAISE。中间字符 6 bit 全有效，换掉必变。
+    mid = len(sig) // 2
+    bad = sig[:mid] + ("A" if sig[mid] != "A" else "B") + sig[mid + 1:]
     with pytest.raises(auth.AuthError):
-        auth.read_token(f"{head}.{payload}.{sig[:-2]}xx")
+        auth.read_token(f"{head}.{payload}.{bad}")
 
 
 def test_token_expired_rejected():
